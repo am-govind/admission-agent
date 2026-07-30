@@ -103,6 +103,7 @@ The model does **not** write SQL for a business metric. It picks a skill, the sk
 ## 🛠️ Quick Start
 
 ### 1. Prerequisites
+
 - **Python**: Version 3.11 or 3.12 (Python 3.12 recommended)
 - **Node.js**: Version 18+
 
@@ -124,7 +125,7 @@ pip install -r requirements.txt
 python run.py
 ```
 
-*Note: On initial startup the backend creates an admin user (`admin` / `admin123`), builds both databases and loads the source named by `DATA_SOURCE` (synthetic sample data by default). Chat answers need a model endpoint with tool-calling support — see [RUNNING.md](RUNNING.md) §2 for OpenRouter's free tier, Groq or a local Ollama.*
+*Note: On initial startup the backend creates an admin user (`admin` / `admin123`), builds both databases and loads the source named by `DATA_SOURCE` (synthetic sample data by default). Chat answers need a model endpoint — see [RUNNING.md](RUNNING.md) §2 for GitHub Models or a local Ollama.*
 
 ---
 
@@ -144,15 +145,15 @@ npm run dev
 
 ## 🔌 API Reference
 
-| Endpoint | Method | Description |
-| :--- | :---: | :--- |
-| `/auth/login` | `POST` | Authenticate user and receive JWT bearer token |
-| `/chat/stream` | `POST` | Streaming SSE endpoint for natural language query execution |
-| `/chat` | `POST` | Non-streaming JSON endpoint returning complete response state |
-| `/refresh` | `POST` | Reload the analytics tables from the configured source |
-| `/refresh/history` | `GET` | Audit trail of refresh runs, with row counts and errors |
-| `/meta` | `GET` | Freshness, table availability, registered skills and tool count |
-| `/health` | `GET` | System health check endpoint |
+| Endpoint             |  Method  | Description                                                     |
+| :------------------- | :------: | :-------------------------------------------------------------- |
+| `/auth/login`      | `POST` | Authenticate user and receive JWT bearer token                  |
+| `/chat/stream`     | `POST` | Streaming SSE endpoint for natural language query execution     |
+| `/chat`            | `POST` | Non-streaming JSON endpoint returning complete response state   |
+| `/refresh`         | `POST` | Reload the analytics tables from the configured source          |
+| `/refresh/history` | `GET` | Audit trail of refresh runs, with row counts and errors         |
+| `/meta`            | `GET` | Freshness, table availability, registered skills and tool count |
+| `/health`          | `GET` | System health check endpoint                                    |
 
 ---
 
