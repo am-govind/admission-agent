@@ -1,13 +1,12 @@
 # Running Locally — Step-by-Step
 
-A verified walkthrough for getting the Admissions & Finance AI Agent running on a
-local machine. The app runs on **synthetic sample data** out of the box, so you can
-try everything without Google Sheets credentials. Only the conversational answers
-need a local LLM (Ollama) — everything else (auth, data, endpoints, UI) works without it.
+A verified walkthrough for getting the Admissions & Finance AI Agent running on a local
+machine. Everything except the conversational answers works without credentials: auth,
+ingestion, metrics, tables, charts and every endpoint run on synthetic data out of the box.
 
 - **Backend** → FastAPI on `http://localhost:8500`
 - **Frontend** → Vite dev server on `http://localhost:5173` (proxies `/api` → `:8500`)
-- **LLM** → Ollama + Qwen2.5 on `http://localhost:11434` (optional but required for chat answers)
+- **LLM** → any OpenAI-compatible endpoint; GitHub Models by default, Ollama locally
 
 Verified with: Python 3.12, Node 20, npm 10 on macOS.
 
@@ -20,7 +19,8 @@ Verified with: Python 3.12, Node 20, npm 10 on macOS.
 | Python | 3.11+ | `python3 --version` |
 | Node | 18+ | `node -v` |
 | npm | 9+ | `npm -v` |
-| Ollama | latest | `ollama --version` (optional, for chat) |
+
+A model endpoint is needed for chat answers — either a GitHub token (§2a) or Ollama (§2b).
 
 ---
 
@@ -55,10 +55,13 @@ python run.py
 ```
 
 On first startup it:
-- creates a bootstrap admin (`admin` / `admin123` by default — change in `.env`),
-- creates the DuckDB file at `./data/app.duckdb`,
-- loads synthetic sample data (RD26, RD25, Finance Dump, Targets),
-- schedules a daily ~06:00 refresh.
+
+- creates the SQLite app database at `./data/app.sqlite3` and bootstraps an admin
+  (`admin` / `admin123` by default — change it in `.env`),
+- migrates users and chat history out of a pre-split `./data/app.duckdb` if one exists,
+- creates the analytics DuckDB at `./data/analytics.duckdb` and loads the data source
+  named by `DATA_SOURCE` (`sample` by default),
+- starts the daily refresh scheduler for 08:30 Asia/Kolkata.
 
 ### Verify the backend
 
@@ -73,38 +76,50 @@ TOKEN=$(curl -s -X POST http://localhost:8500/auth/login \
   -d '{"username":"admin","password":"admin123"}' \
   | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
-# data status
+# freshness, row counts, which tables are usable, skills and tool count
 curl -s http://localhost:8500/meta -H "Authorization: Bearer $TOKEN"
-# -> {"last_refresh":"...","source":"sample"}
+
+# refresh now, and read the audit trail
+curl -s -X POST http://localhost:8500/refresh -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:8500/refresh/history -H "Authorization: Bearer $TOKEN"
 ```
 
-> **Note:** Interactive API docs are available at `http://localhost:8500/docs`.
+> Interactive API docs: `http://localhost:8500/docs`.
 
 ---
 
-## 2. LLM (Ollama) — required for chat answers
+## 2. A model endpoint — required for chat answers
 
-The router and skills call a local Qwen2.5 model through Ollama. Without it, the app
-still boots and serves data, but `/chat` returns a clean `503 The model service is
-unavailable`.
+Without one the app still boots and serves data; `/chat` replies that the model is not
+configured. Routing, metrics and rendering all keep working.
 
-```bash
-# install (macOS)
-brew install ollama          # or download from https://ollama.com
+### 2a. GitHub Models (default, no local GPU)
 
-# start the Ollama service (leave running in its own terminal)
-ollama serve
+Create a token with the **models** permission, then in `backend/.env`:
 
-# pull a model (in another terminal)
-ollama pull qwen2.5:14b-instruct     # needs ~10GB RAM/VRAM
-# or, for smaller machines:
-ollama pull qwen2.5:7b-instruct
+```
+LLM_BASE_URL=https://models.github.ai/inference
+LLM_MODEL=openai/gpt-4.1
+GITHUB_TOKEN=<your token>
 ```
 
-If you use a different tag, update `OLLAMA_MODEL` in `backend/.env` to match, then
-restart the backend.
+### 2b. Ollama (fully local)
 
-Confirm chat works end-to-end:
+```bash
+brew install ollama          # or download from https://ollama.com
+ollama serve                 # leave running in its own terminal
+ollama pull qwen2.5:14b-instruct     # ~10GB RAM/VRAM; use :7b-instruct if tighter
+```
+
+Then in `backend/.env`:
+
+```
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=qwen2.5:14b-instruct
+LLM_API_KEY=ollama
+```
+
+Restart the backend, then confirm chat works end to end:
 
 ```bash
 curl -s -X POST http://localhost:8500/chat \
@@ -124,8 +139,8 @@ npm run dev
 # serves on http://localhost:5173 and proxies /api -> http://localhost:8500
 ```
 
-Open **http://localhost:5173**, sign in with the admin credentials, and ask
-questions in English or Hinglish.
+Open **http://localhost:5173**, sign in with the admin credentials, and ask questions in
+English or Hinglish.
 
 ### Verify the frontend
 
@@ -136,34 +151,44 @@ curl -s http://localhost:5173/api/health                            # -> {"statu
 
 ---
 
-## 4. Run the tests (golden-parity harness)
+## 4. Run the tests
 
 ```bash
 cd backend
 source .venv/bin/activate
 pytest -q
-# -> 16 passed
 ```
+
+No model, network or credentials needed. The suite redirects every path into a temp
+directory, so it never touches your local `data/`.
 
 ---
 
-## 5. Switching to the real Google Sheet
+## 5. Using the real Google Sheet
 
-By default `USE_SAMPLE_DATA=true`. To use the real workbook:
-
-1. Create a Google service account, share the workbook with it, download the JSON key
-   into `backend/secrets/service-account.json`.
-2. In `backend/.env`:
+1. Create a Google service account and download its JSON key to
+   `backend/secrets/service-account.json`.
+2. Share the workbook with the `client_email` from that file (Viewer is enough).
+   Skipping this step makes reads fail with a 404 that looks like a wrong sheet ID.
+3. In `backend/.env`:
    ```
-   USE_SAMPLE_DATA=false
+   DATA_SOURCE=gsheets
    GSHEET_ID=<the real sheet id>
    GOOGLE_APPLICATION_CREDENTIALS=./secrets/service-account.json
-   TAB_TARGETS=Targets   # confirm the real targets tab name + layout
+   TAB_RD26=RD26_DUMP
+   TAB_RD25=RD25_DUMP
+   TAB_FINANCE=Finance Dump
+   TAB_TARGETS=Targets
    ```
-3. Restart the backend, then trigger a pull:
+4. Restart the backend and trigger a pull:
    ```bash
    curl -X POST http://localhost:8500/refresh -H "Authorization: Bearer $TOKEN"
    ```
+   The response reports rows loaded per table, plus any tab that was absent. Tabs that
+   are missing are reported, not invented, and the metrics that need them say so.
+
+To work from a local export instead, set `DATA_SOURCE=excel` and
+`EXCEL_FILE_PATH=../TRY.xlsx`.
 
 ---
 
@@ -171,25 +196,26 @@ By default `USE_SAMPLE_DATA=true`. To use the real workbook:
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `/chat` → `503 The model service is unavailable` | Ollama not running / model not pulled | Start `ollama serve` and `ollama pull qwen2.5:...`; match `OLLAMA_MODEL` in `.env` |
+| Chat replies "the language model is not configured" | no `GITHUB_TOKEN` / `LLM_API_KEY` | set one per §2, then restart |
+| `/chat` → `503` | the configured endpoint is unreachable | check `LLM_BASE_URL`; for Ollama make sure `ollama serve` is running |
 | `ModuleNotFoundError: fastapi` | venv not activated / deps not installed | `source .venv/bin/activate && pip install -r requirements.txt` |
-| `[Errno 48] Address already in use` on `:8500` | a previous backend is still running | find and stop it: `lsof -ti:8500 \| xargs kill -9` |
-| Login fails | wrong credentials, or admin created earlier with a different password | use the values in `.env`; the admin is only bootstrapped when the users table is empty (delete `backend/data/app.duckdb` to re-bootstrap) |
-| Frontend loads but calls fail | backend not running / wrong port | ensure backend is on `:8500`; the Vite proxy targets that port |
-| `Fontconfig error: No writable cache directories` (backend log) | matplotlib font cache | harmless; to silence, set `export MPLCONFIGDIR=/tmp/mpl` before starting |
+| `[Errno 48] Address already in use` on `:8500` | a previous backend is still running | `lsof -ti:8500 \| xargs kill -9` |
+| Login fails | admin was bootstrapped earlier with a different password | the admin is only created when the users table is empty; delete `backend/data/app.sqlite3` to re-bootstrap |
+| A metric replies that data is unavailable | its source tab was not loaded | check `GET /meta` for the table's `reason`, then fix the tab name in `.env` and refresh |
+| Answers start with a staleness warning | no successful refresh in over a day | `GET /refresh/history` shows the failure, and `lastError` in `/meta` explains it |
+| Refresh fails with a 404 from Google | workbook not shared with the service account | share it with the key's `client_email` |
+| `JSONDecodeError` reading the service-account key | the key file is malformed | re-download it; the `private_key` newlines must be intact |
+| Frontend loads but calls fail | backend not running / wrong port | ensure the backend is on `:8500`; the Vite proxy targets that port |
 
 ---
 
 ## 7. Quick start (all together)
 
 ```bash
-# terminal 1 — Ollama
-ollama serve
-
-# terminal 2 — backend
+# terminal 1 — backend
 cd backend && source .venv/bin/activate && python run.py
 
-# terminal 3 — frontend
+# terminal 2 — frontend
 cd frontend && npm run dev
 ```
 
