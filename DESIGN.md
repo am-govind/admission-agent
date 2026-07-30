@@ -1,6 +1,10 @@
 # Admissions & Finance AI Agent � Design & Architecture Spec
 
-_Status: Draft for review. Derived from a grilling session on 2026-07-19 and `Business_Logic_Report_DETAILED.pdf`._
+_Status: implemented. Derived from a grilling session on 2026-07-19 and `Business_Logic_Report_DETAILED.pdf`._
+
+_Sections 1, 4, 5 and 6 still describe the system as built. Section 2 is preserved as the
+original decision record; where implementation changed a decision, §2.1 says so and why.
+The current code layout is documented in [backend/README.md](backend/README.md)._
 
 ## 1. Purpose
 
@@ -41,6 +45,18 @@ The agent **never writes** anything back to the source and **never invents a num
 | 23 | Validation | **Golden-parity harness**: assert each tool == sheet's computed values per center/metric on each refresh; alert on drift. |
 | 24 | Language | Accept English + Hindi/Hinglish; reply in user's language; **Indian money formatting** (?, lakhs/crores). |
 
+## 2.1 Amendments During Implementation
+
+| # | Original | Now | Why |
+|---|----------|-----|-----|
+| 3 | DuckDB for everything | **DuckDB for analytics, SQLite for app state** | The analytics file is dropped and rebuilt by every refresh. Users, chat history and conversation memory cannot live in a file that gets replaced. `core/migrate.py` moves pre-split state across once. |
+| 4 | Sealed tools the LLM selects | **Unchanged, with the seam moved**: logic in `analytics/`, tools are validating wrappers | Eight of 28 tools are composites that fan out over the others, so the logic must be callable from Python, not only from the model. Thresholds are declared once in `analytics/filters.py`; a test fails the build if a threshold literal appears under `agent/tools/`. |
+| 6 | Qwen2.5 via Ollama | **Any OpenAI-compatible endpoint**, defaulting to GitHub Models `gpt-4.1` | Native tool-calling made the provider interchangeable. Ollama and vLLM still work by changing two env vars. |
+| 8 | matplotlib → base64 PNG image block | **Native `chart` content blocks rendered by Recharts** | A PNG cannot be hovered, resized or read by a screen reader, and it put a plotting library and font cache in the request path. The chart now ships as the tool's own data plus a `ChartSpec`. |
+| 11 | Persisted transcript keyed by conversation | **Transcript plus explicit memory slots** | A follow-up needs the center, region and metric under discussion — a handful of short values. Storing them explicitly makes "and for Pune?" work, and makes what was inherited visible in provenance instead of silently scoping a number. |
+| 14 | APScheduler morning job | **Catch-up scheduler** driven by a persisted `last_success` | A cron-style job that fires at 08:30 does nothing if the process was down at 08:30. Comparing against the last elapsed cutoff refreshes exactly once, and immediately after a restart. Ingestion also does not fabricate data when the source fails: the run is recorded as failed and the previous data stands. |
+| 23 | Golden-parity harness | **Invariant harness in place; golden values pending the workbook export** | The invariants (ratios stay fractions, parts sum to the whole, scoped counts never exceed global) catch filter drift today. `GOLDEN` in `tests/test_parity.py` is the one dict to fill for cell-for-cell agreement. |
+
 ## 3. Architecture
 
 ```
@@ -73,40 +89,52 @@ The agent **never writes** anything back to the source and **never invents a num
 ???????????????????????????????????????????????????????????????????
 ```
 
-### 3.1 Engine: Router -> Skills -> Tools (implemented)
+### 3.1 Engine: Router -> Skill -> Tool -> Analytics (implemented)
 
-The single flat agent was replaced by a two-layer engine for readability and control:
+The flat agent was replaced by a layered engine, held together by three contracts:
 
-- **Master router** (`agent/router.py`): an LLM call (with a deterministic keyword
-  fallback) that reads the question and picks ONE skill. It never answers itself.
-- **Skills** (`agent/skills/*.py`): domain capabilities, each with a focused prompt and a
-  *scoped* toolset � Admissions, Finance, Revenue, Retention, Cancellations, Data Explorer,
-  and Knowledge (definitions / greetings / honest out-of-scope; no tools).
-- **Tools**: thin `@agent.tool` wrappers, inside each skill, over the **analytics** layer.
-- **Analytics** (`analytics/*.py`): the sealed blackbox logic � pure DuckDB functions.
+- **A skill is data.** `agent/skills/definitions/<id>/SKILL.md` — YAML frontmatter naming
+  the tools it may call, plus `intents` and `triggers` for the fallback router, and a
+  markdown body used verbatim as prompt text. Seven skills: Admissions, Finance, Revenue,
+  Retention, Cancellations, Data Explorer, and Knowledge (definitions, greetings, honest
+  out-of-scope; no tools). Adding a skill is adding a file.
+- **A tool is a validated wrapper.** `@tool(name, description, ParamsModel)` derives the
+  OpenAI function schema from a pydantic model and validates arguments before any SQL
+  runs, so a hallucinated argument becomes a corrective message rather than a wrong
+  number. 28 tools, all one-liners delegating to analytics.
+- **`ToolResult` is the universal envelope.** `ok` with `values`, an optional table and
+  `ChartSpec`, and a `Provenance`; or not-ok with `unavailable_reason` (source missing) or
+  `clarification` (ambiguous center).
 
-Benefits: smaller prompts per skill (better local-model tool selection), clear ownership,
-trivial extension (add one skill file + register it), and the router decision is surfaced
-to the UI ("Routing to the <skill> skill...").
+The **router** (`agent/router.py`) picks exactly one skill and never answers. It prefers an
+LLM choice and falls back to scoring the frontmatter triggers and intents, so routing
+still works with no model reachable.
 
 ### Request flow
 1. User asks a question -> frontend `POST /chat/stream`.
-2. Guardrails scan input (injection/jailbreak).
-3. **Router** picks a skill (LLM, keyword fallback); UI shows the routing status.
-4. The **skill's** agent (Qwen2.5) selects its tools + extracts params; center/region
-   resolved via registry (clarify if ambiguous).
-5. Sealed **analytics** function runs exact DuckDB SQL against the current dump
-   (reference-date anchored); optional matplotlib chart -> base64 PNG.
-6. LLM composes answer + provenance note; guardrails mask any residual PII.
-7. Backend streams `run-started -> thinking -> processing-status (routing) ->
-   text-message-* deltas -> state-delta (tables/images) -> run-finished`.
-8. Frontend applies JSON patches, renders blocks incrementally.
+2. Guardrails scan the input (injection, jailbreak).
+3. Memory loads the center/region/metric slots for the conversation.
+4. **Router** picks one skill (LLM, keyword fallback); the UI shows the decision.
+5. **Loop** (`agent/loop.py`) runs a capped tool-calling loop offering only that skill's
+   tools. Omitted center/region are inherited from memory, and every inheritance is
+   recorded in provenance.
+6. Each **tool** validates its arguments and delegates to a sealed **analytics** function,
+   which runs parameterised DuckDB SQL anchored to the reference date. Ambiguous centers
+   come back as a clarification; missing sources as an explicit decline.
+7. The model composes prose from the returned `ToolResult`s; guardrails mask residual PII.
+8. **Runtime** turns each result into native `table` and `chart` blocks, prepends a
+   staleness note when the refresh is overdue, and appends the provenance line.
+9. Backend streams `run-started -> thinking-start -> processing-status (per tool call) ->
+   thinking-end -> state-delta (chart/table blocks) -> text-message-* deltas ->
+   state-delta (provenance) -> run-finished`.
+10. Frontend applies the JSON patches and renders blocks incrementally.
 
 ### 3.2 Repo structure (implemented)
-Layered top -> bottom by dependency: `api/` (HTTP) -> `agent/` (router + skills + tools) ->
-`analytics/` (sealed logic) -> `data/` (ingestion, registry, reference date, history) ->
-`core/` (config, database, security), plus `guardrails/` (cross-cutting input/output
-safety) and `streaming/` (SSE). See `backend/README.md`.
+Layered top -> bottom by dependency: `api/` (HTTP) -> `agent/` (router, skills, tools,
+loop, memory) -> `analytics/` (sealed logic) -> `data/` (sources, ingestion, availability,
+registry, reference date) -> `core/` (config, DuckDB, SQLite, security), plus
+`guardrails/` (cross-cutting input/output safety) and `streaming/` (SSE). See
+[backend/README.md](backend/README.md).
 
 ## 4. Tool Catalog (v1 � full)
 
@@ -128,9 +156,16 @@ All tools honor the standard filter set unless noted, and each replicates its so
 - `cancellations(center, region)` � count + rate (note: cancellation count does NOT filter free/active/fees).
 
 **Utility tools**
-- `preview_columns(tab, n=5)` � masked sample (names/reg-numbers anonymized).
-- `plot_trend(metric, by)` � matplotlib chart ? base64 PNG image block.
-- Roll-ups: center ? region subtotal ? grand total for every metric.
+- `preview_columns(table, n=5)` � masked sample (names/reg-numbers never projected).
+- `describe_tables`, `list_centers`, `get_data_freshness` � schema and availability.
+- `explore_data(sql, limit?)` � guarded ad-hoc `SELECT` for questions no metric tool
+  covers: single statement, row-capped, PII columns denied, running on a read-only
+  `ATTACH` with external file access disabled.
+- Roll-ups: center ? region subtotal ? grand total for every metric, plus
+  `get_target_scoreboard`.
+- Charting is not a tool. Any metric result that is worth plotting carries a `ChartSpec`,
+  and the runtime emits the chart block � so the model cannot choose to visualise
+  something it did not measure.
 
 ## 5. Data-Fidelity Notes (must replicate, do NOT normalize)
 - Threshold: fresh-reg `L>3498`; class-wise & Finance `Reg` `L>=3498`. Kept per-metric.
@@ -165,15 +200,17 @@ All tools honor the standard filter set unless noted, and each replicates its so
 - RD25 + Finance Dump ingest.
 - Reference-date anchoring across all time-relative tools.
 
-**Phase 3 � Visualization & polish**
-- `plot_trend` matplotlib ? base64 image blocks (DOD/monthwise/classwise charts).
+**Phase 3 � Visualization & polish** (done, via chart blocks rather than PNGs)
+- Native `chart` blocks driven by each metric's `ChartSpec` (DOD, monthwise, classwise,
+  region roll-ups).
 - Provenance notes, ambiguity clarification flow, out-of-scope handling, Hinglish + Indian formatting.
 
 **Phase 4 � Trust & ops**
-- Golden-parity harness + drift alerting (email + log) on each morning refresh.
-- APScheduler morning job.
-- LLM-Guard full input/output config + PII masking tests.
-- Deployment to internal GPU VM behind VPN.
+- Done: invariant parity harness, refresh audit trail in `refresh_runs`, failure alerting
+  (log + email), catch-up scheduler, guardrail and explorer-escape tests, freshness
+  reporting on `GET /meta` with a staleness warning on every answer.
+- Remaining: export golden values from the workbook into `GOLDEN` in
+  `tests/test_parity.py` for cell-for-cell agreement, and deploy behind the VPN.
 
 ## 8. Resolved Configuration
 
