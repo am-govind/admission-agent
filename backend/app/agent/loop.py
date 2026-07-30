@@ -44,7 +44,7 @@ class LoopOutcome:
 
 NO_MODEL_MESSAGE = (
     "The language model is not configured, so I cannot answer questions yet. "
-    "Set LLM_API_KEY (or GITHUB_TOKEN) in backend/.env and restart.")
+    "Set LLM_API_KEY in backend/.env and restart. See RUNNING.md §2 for providers.")
 
 
 async def run_loop(message: str, skill: Skill, history: list[dict] | None = None,

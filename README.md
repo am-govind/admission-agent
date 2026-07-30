@@ -124,7 +124,7 @@ pip install -r requirements.txt
 python run.py
 ```
 
-*Note: On initial startup the backend creates an admin user (`admin` / `admin123`), builds both databases and loads the source named by `DATA_SOURCE` (synthetic sample data by default). Chat answers need a model endpoint — see [RUNNING.md](RUNNING.md) §2 for GitHub Models or a local Ollama.*
+*Note: On initial startup the backend creates an admin user (`admin` / `admin123`), builds both databases and loads the source named by `DATA_SOURCE` (synthetic sample data by default). Chat answers need a model endpoint with tool-calling support — see [RUNNING.md](RUNNING.md) §2 for OpenRouter's free tier, Groq or a local Ollama.*
 
 ---
 

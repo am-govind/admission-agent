@@ -3,7 +3,7 @@ uvicorn[standard]==0.30.6
 pydantic>=2.12,<3
 pydantic-settings==2.5.2
 
-# OpenAI-compatible client; also used against GitHub Models and local Ollama/vLLM.
+# OpenAI-compatible client; also used against OpenRouter, Groq and local Ollama/vLLM.
 openai>=1.40.0
 
 # Analytics store. App state lives in SQLite via the stdlib sqlite3 module.

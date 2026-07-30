@@ -6,7 +6,8 @@ ingestion, metrics, tables, charts and every endpoint run on synthetic data out 
 
 - **Backend** → FastAPI on `http://localhost:8500`
 - **Frontend** → Vite dev server on `http://localhost:5173` (proxies `/api` → `:8500`)
-- **LLM** → any OpenAI-compatible endpoint; GitHub Models by default, Ollama locally
+- **LLM** → any OpenAI-compatible endpoint with tool calling; OpenRouter's free tier by
+  default, Groq or a local Ollama as alternatives
 
 Verified with: Python 3.12, Node 20, npm 10 on macOS.
 
@@ -110,17 +111,46 @@ curl -s http://localhost:8500/refresh/history -H "Authorization: Bearer $TOKEN"
 Without one the app still boots and serves data; `/chat` replies that the model is not
 configured. Routing, metrics and rendering all keep working.
 
-### 2a. GitHub Models (default, no local GPU)
+Whichever you pick, the model **must support native tool calling**. The agent loop asks for
+`tool_calls` and has no text-parsing fallback, so a model without tool support answers from
+the system prompt alone and never touches your data.
 
-Create a token with the **models** permission, then in `backend/.env`:
+> **GitHub Models is retired** (fully shut down 30 July 2026; the endpoint now returns
+> HTTP 410 `github_models_retirement_brownout`). It was the previous default. If you have an
+> old `.env` pointing at `models.github.ai`, change it — no model ID on that host works.
+
+### 2a. OpenRouter (default, free tier, no local GPU)
+
+Create a key at [openrouter.ai/keys](https://openrouter.ai/keys), then in `backend/.env`:
 
 ```
-LLM_BASE_URL=https://models.github.ai/inference
-LLM_MODEL=openai/gpt-4.1
-GITHUB_TOKEN=<your token>
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=openai/gpt-oss-20b:free
+LLM_API_KEY=<your key>
 ```
 
-### 2b. Ollama (fully local)
+The `:free` suffix matters — without it the same model is billed. Only some free models
+support tool calling; to list the current set:
+
+```bash
+curl -s https://openrouter.ai/api/v1/models \
+  | python3 -c 'import json,sys; [print(m["id"]) for m in json.load(sys.stdin)["data"] if m["id"].endswith(":free") and "tools" in (m.get("supported_parameters") or [])]'
+```
+
+Free tiers are rate-limited (roughly 50 requests/day under $10 of credit). One chat turn
+costs two calls — one to route, one or more for the tool loop — so budget accordingly.
+
+### 2b. Groq (free, no card, fastest)
+
+Create a key at [console.groq.com](https://console.groq.com/), then:
+
+```
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_MODEL=llama-3.3-70b-versatile
+LLM_API_KEY=<your key>
+```
+
+### 2c. Ollama (fully local)
 
 ```bash
 brew install ollama          # or download from https://ollama.com
@@ -252,7 +282,12 @@ per-user audit trail real rather than aspirational.
 |---------|-------|-----|
 | No log output at all beyond uvicorn's own lines | an older `run.py`, or the app started some other way | start with `python run.py`, or call `setup_logging()` before your own `uvicorn.run` |
 | Chat replies "the language model is not configured" | no `GITHUB_TOKEN` / `LLM_API_KEY` | set one per §2, then restart |
+| Chat replies "the language model is not configured" | no `LLM_API_KEY` | set one per §2, then restart |
 | `/chat` → `503` | the configured endpoint is unreachable | check `LLM_BASE_URL`; for Ollama make sure `ollama serve` is running |
+| `/chat` → `410`, or an error naming `github_models_retirement_brownout` | `.env` still points at the retired GitHub Models | switch `LLM_BASE_URL` and `LLM_MODEL` per §2a |
+| Replies ignore your data and answer only in generalities | the chosen model has no tool-calling support | pick one from the §2a list; free models without `tools` cannot query anything |
+| `404` naming the model, on OpenRouter | dropped the `:free` suffix, or the model was withdrawn | re-run the model-list command in §2a |
+| Chat worked, then started failing after a few turns | free-tier daily request cap | wait for the reset, add credit, or switch provider — one turn costs two or more calls |
 | `ModuleNotFoundError: fastapi` | venv not activated / deps not installed | `source .venv/bin/activate && pip install -r requirements.txt` |
 | `[Errno 48] Address already in use` on `:8500` | a previous backend is still running | `lsof -ti:8500 \| xargs kill -9` |
 | Login fails | admin was bootstrapped earlier with a different password | the admin is only created when the users table is empty; delete `backend/data/app.sqlite3` to re-bootstrap |

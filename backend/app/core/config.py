@@ -80,10 +80,11 @@ class Settings(BaseSettings):
     explorer_max_rows: int = 200
     memory_verbatim_turns: int = 10
 
-    # LLM — any OpenAI-compatible endpoint (GitHub Models, HF router, Ollama, vLLM)
-    llm_base_url: str = "https://models.github.ai/inference"
-    llm_model: str = "openai/gpt-4.1"
-    llm_api_key: str = Field("", validation_alias=AliasChoices("LLM_API_KEY", "GITHUB_TOKEN"))
+    # LLM — any OpenAI-compatible endpoint (OpenRouter, Groq, HF router, Ollama, vLLM).
+    # The model must support native tool calling; the agent loop has no text-parsing fallback.
+    llm_base_url: str = "https://openrouter.ai/api/v1"
+    llm_model: str = "openai/gpt-oss-20b:free"
+    llm_api_key: str = Field("", validation_alias=AliasChoices("LLM_API_KEY", "OPENROUTER_API_KEY"))
     # Omitted from the request when unset — reasoning models (e.g. gpt-5) reject a custom value.
     llm_temperature: float | None = None
     # Disable for providers that reject or ignore response_format (e.g. Scaleway).
