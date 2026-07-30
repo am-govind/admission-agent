@@ -6,6 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from ..agent.memory import history_for_prompt
 from ..agent.runtime import run_turn
 from ..core.security import current_user
 from ..data import conversation
@@ -42,26 +43,32 @@ async def chat(body: ChatRequest, user: str = Depends(current_user)) -> ChatResp
     cid = conversation.ensure_conversation(body.conversationId, user)
     turn = conversation.next_turn(cid)
     conversation.add_message(cid, turn, "user", body.message)
-    history = conversation.get_history(cid)
+    history = history_for_prompt(cid)
     try:
-        output = await run_turn(body.message, history)
+        output = await run_turn(body.message, cid, history)
     except Exception as e:  # noqa: BLE001 - surface a clean error to the client
         raise HTTPException(
             status_code=503, detail=f"The model service is unavailable: {e}") from e
 
     answer = scan_output(output.text)
     state = RenderState()
-    part_id = f"text-{uuid.uuid4().hex[:8]}"
-    state.parts.append({"type": "text", "id": part_id, "content": answer})
+    # Blocks first so the table or chart renders above the prose, matching the stream.
     for block in output.artifacts:
         state.contentBlocks[block.id] = block
         state.parts.append({"type": "block-ref", "id": block.id})
-    if output.provenance:
-        prov = "How I got this: " + " | ".join(dict.fromkeys(output.provenance))
-        state.parts.append({"type": "text", "id": f"text-{uuid.uuid4().hex[:8]}", "content": prov})
-        answer = f"{answer}\n\n{prov}"
+    state.parts.append(
+        {"type": "text", "id": f"text-{uuid.uuid4().hex[:8]}", "content": answer})
 
-    conversation.add_message(cid, turn, "assistant", answer)
+    stored = answer
+    if output.provenance:
+        provenance = "How I got this: " + " | ".join(dict.fromkeys(output.provenance))
+        state.parts.append({"type": "text", "id": f"text-{uuid.uuid4().hex[:8]}",
+                            "content": provenance})
+        stored = f"{answer}\n\n{provenance}"
+
+    conversation.add_message(cid, turn, "assistant", stored)
     return ChatResponse(
         conversationId=cid, messageId=f"msg-{uuid.uuid4().hex[:10]}", renderState=state,
-        metadata={"turnId": turn, "skill": output.skill_id, "routeReason": output.route_reason})
+        metadata={"turnId": turn, "skill": output.skill_id,
+                  "skillName": output.skill_name, "routeReason": output.route_reason,
+                  "routeMethod": output.route_method, "toolCalls": output.tool_calls})
