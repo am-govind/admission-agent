@@ -1,13 +1,27 @@
 """Application configuration, loaded from environment / .env."""
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
+from typing import Literal
+from zoneinfo import ZoneInfo
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Anchored to backend/ so the app can be launched from any working directory.
-_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = _BACKEND_ROOT / ".env"
+
+
+def _resolve(raw: str) -> Path:
+    """Relative paths are anchored to backend/, not the process working directory.
+
+    Without this, launching from the repo root and from backend/ would silently
+    create two different database files.
+    """
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else (_BACKEND_ROOT / path).resolve()
 
 
 class Settings(BaseSettings):
@@ -25,9 +39,15 @@ class Settings(BaseSettings):
     bootstrap_admin_user: str = "admin"
     bootstrap_admin_password: str = "admin123"
 
-    # Data
-    duckdb_path: str = "./data/app.duckdb"
-    use_sample_data: bool = True
+    # Storage — analytics is replaced wholesale by every refresh, so durable app
+    # state (users, chat, memory, audit) lives in a separate SQLite file.
+    duckdb_path: str = "./data/analytics.duckdb"
+    appdb_path: str = "./data/app.sqlite3"
+    # Pre-split single-file database, read once by core.migrate.
+    legacy_duckdb_path: str = "./data/app.duckdb"
+
+    # Ingestion — exactly one source, chosen explicitly. No silent fallbacks.
+    data_source: Literal["gsheets", "excel", "sample"] = "sample"
     excel_file_path: str = "../TRY.xlsx"
 
     # Google Sheets
@@ -37,6 +57,20 @@ class Settings(BaseSettings):
     tab_rd25: str = "RD25_DUMP"
     tab_finance: str = "Finance Dump"
     tab_targets: str = "Targets"
+    # The API caps a single response near 10MB; 5000 rows x 21 columns stays well under.
+    sheets_batch_rows: int = 5000
+    sheets_max_retries: int = 3
+
+    # Daily refresh
+    refresh_at: str = "08:30"
+    refresh_tz: str = "Asia/Kolkata"
+    refresh_poll_seconds: int = 900
+    refresh_on_startup_if_empty: bool = True
+
+    # Agent
+    agent_max_tool_iterations: int = 5
+    explorer_max_rows: int = 200
+    memory_verbatim_turns: int = 10
 
     # LLM — any OpenAI-compatible endpoint (GitHub Models, HF router, Ollama, vLLM)
     llm_base_url: str = "https://models.github.ai/inference"
@@ -59,9 +93,52 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "agent@example.com"
 
+    @field_validator("refresh_at")
+    @classmethod
+    def _check_refresh_at(cls, v: str) -> str:
+        try:
+            dt.datetime.strptime(v.strip(), "%H:%M")
+        except ValueError as e:
+            raise ValueError(f"REFRESH_AT must be HH:MM (24-hour), got {v!r}") from e
+        return v.strip()
+
+    @field_validator("refresh_tz")
+    @classmethod
+    def _check_refresh_tz(cls, v: str) -> str:
+        try:
+            ZoneInfo(v.strip())
+        except Exception as e:  # noqa: BLE001 - ZoneInfoNotFoundError plus OS variants
+            raise ValueError(f"REFRESH_TZ is not a known IANA timezone: {v!r}") from e
+        return v.strip()
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def duckdb_file(self) -> Path:
+        return _resolve(self.duckdb_path)
+
+    @property
+    def appdb_file(self) -> Path:
+        return _resolve(self.appdb_path)
+
+    @property
+    def legacy_duckdb_file(self) -> Path:
+        return _resolve(self.legacy_duckdb_path)
+
+    @property
+    def excel_file(self) -> Path:
+        return _resolve(self.excel_file_path)
+
+    @property
+    def refresh_zone(self) -> ZoneInfo:
+        return ZoneInfo(self.refresh_tz)
+
+    @property
+    def refresh_time(self) -> dt.time:
+        parsed = dt.datetime.strptime(self.refresh_at, "%H:%M")
+        return dt.time(parsed.hour, parsed.minute)
 
 
 settings = Settings()

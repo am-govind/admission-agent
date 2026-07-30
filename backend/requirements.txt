@@ -2,16 +2,26 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic>=2.12,<3
 pydantic-settings==2.5.2
-# Using standard OpenAI SDK for GitHub Models support
+
+# OpenAI-compatible client; also used against GitHub Models and local Ollama/vLLM.
 openai>=1.40.0
+
+# Analytics store. App state lives in SQLite via the stdlib sqlite3 module.
 duckdb==1.1.1
-matplotlib==3.9.2
+
+# Skill definitions are YAML frontmatter in SKILL.md.
+PyYAML==6.0.2
+
 PyJWT==2.9.0
 bcrypt==4.2.0
-python-multipart==0.0.9
-httpx==0.27.2
-# Google Sheets ingestion (optional; app runs on synthetic data without these)
+
+# Ingestion sources.
+openpyxl==3.1.5
 google-api-python-client==2.147.0
 google-auth==2.35.0
-# Guardrails (optional heavy dep; a lightweight built-in fallback is used if absent)
-# llm-guard==0.3.15
+
+# Tests.
+pytest==8.3.3
+
+# Charts are rendered client-side from chart content blocks, so no server-side plotting
+# library is needed. Guardrails use a built-in rule set rather than llm-guard.

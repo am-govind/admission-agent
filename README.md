@@ -1,19 +1,21 @@
 # Admissions & Finance AI Agent 🚀
 
-A **standalone, read-only conversational analytics agent** built for educational and coaching institute admissions and finance operations. It turns natural language questions into precise, audited SQL analytics against high-volume student data (such as 40,000+ record Excel dumps or live Google Sheets), streaming back insights, interactive tables, and charts.
+A **standalone, read-only conversational analytics agent** for coaching-institute admissions and finance operations. It answers natural-language questions from high-volume student data (40,000+ row Google Sheets or Excel dumps) and streams back prose, interactive tables and charts.
+
+The model does **not** write SQL for a business metric. It picks a skill, the skill calls a tool, and the tool delegates to sealed analytics functions that replicate the spreadsheet's own formulas. Every number is auditable, and a missing data source produces an explicit decline rather than a plausible-looking figure.
 
 ---
 
 ## 🌟 Features
 
-- **⚡ Fast Text-to-SQL Analytics Engine**: High-performance DuckDB query execution with automatic schema inference, numeric sanitization, and time-anchored aggregations.
-- **📊 Multi-Source Ingestion**:
-  - **Excel (`.xlsx`)**: Native streaming ingestion for large dumps (e.g. `TRY.xlsx` with 42,000+ records) in under 3 seconds.
-  - **Google Sheets API**: Live morning sync & on-demand manual refresh.
-  - **Offline Fallback**: Built-in synthetic sample data generator so the application is instantly runnable out of the box with zero external credentials.
-- **🛡️ Guardrails & PII Masking**: Input prompt-injection filtering and strict output PII masking for student names and registration numbers.
-- **📡 Real-Time SSE Streaming**: Low-latency Server-Sent Events (SSE) protocol delivering fine-grained JSON-Patch updates to the frontend.
-- **🎨 Premium Modern UI**: Clean React + Vite + TypeScript interface powered by Tailwind CSS, rendering streaming markdown text, formatted tables, and charts.
+- **🧠 Skills & Tools Architecture**: A router selects exactly one skill per question; the skill offers the model a scoped set of pydantic-validated tools. Skills are declarative `SKILL.md` files, so adding a capability means adding a file.
+- **🔒 Sealed Analytics**: Business logic lives in pure typed Python over DuckDB, faithful to the workbook down to the deliberate `> 3498` vs `>= 3498` distinction. A build-failing test keeps threshold literals out of the tool layer.
+- **📊 Multi-Source Ingestion**: Google Sheets (windowed reads with backoff), Excel (`TRY.xlsx`, 42,000 rows in under a second), or synthetic sample data — selected explicitly, with no silent fallback. Typed staging plus an atomic swap means a failed refresh leaves the last good data intact.
+- **🕗 Catch-Up Scheduling**: A daily 08:30 Asia/Kolkata refresh driven off a persisted last-success, so a restart never skips or repeats a day. Every run is audited in `refresh_runs`, and stale data is flagged on every answer.
+- **🧵 Conversation Memory**: Slot-based memory means "and for Pune?" works, and any scope inherited from an earlier turn is stated in the provenance rather than applied silently.
+- **🛡️ Guardrails & PII Masking**: Prompt-injection screening on input, PII masking on output, and an ad-hoc SQL path that is `SELECT`-only, row-capped and PII-denied on a read-only connection with file access disabled.
+- **📡 Real-Time SSE Streaming**: Fine-grained JSON-Patch updates, with a status line per tool call.
+- **🎨 Modern UI**: React + Vite + TypeScript + Tailwind, rendering native table and chart blocks (Recharts) rather than markdown the model retyped.
 
 ---
 
@@ -28,19 +30,36 @@ A **standalone, read-only conversational analytics agent** built for educational
                       ┌─────────────────────────────────┐
                       │         FastAPI Backend         │
                       └────────────────┬────────────────┘
-                                       │
-                ┌──────────────────────┼──────────────────────┐
-                ▼                      ▼                      ▼
-     ┌───────────────────┐   ┌───────────────────┐  ┌───────────────────┐
-     │ Guardrails Filter │   │ Text-to-SQL Agent │  │  Data Ingestion   │
-     │ (PII & Injection) │   │ (LLM / Prompts)   │  │ (Excel/GSheets)   │
-     └───────────────────┘   └─────────┬─────────┘  └─────────┬─────────┘
-                                       │                      │
-                                       ▼                      ▼
-                             ┌──────────────────────────────────┐
-                             │       DuckDB Storage & Engine    │
-                             │ (rd26, rd25, finance, targets)   │
-                             └──────────────────────────────────┘
+                                       ▼
+                      ┌─────────────────────────────────┐
+                      │  Guardrails  →  Memory slots    │
+                      └────────────────┬────────────────┘
+                                       ▼
+                      ┌─────────────────────────────────┐
+                      │  Router — picks ONE skill        │
+                      └────────────────┬────────────────┘
+                                       ▼
+                      ┌─────────────────────────────────┐
+                      │  Skill (SKILL.md) → its tools    │
+                      └────────────────┬────────────────┘
+                                       │ pydantic-validated args
+                                       ▼
+                      ┌─────────────────────────────────┐
+                      │  Sealed analytics → ToolResult   │
+                      │  values + table + chart + prov.  │
+                      └────────────────┬────────────────┘
+              ┌────────────────────────┴────────────────────────┐
+              ▼                                                 ▼
+   ┌──────────────────────────────┐              ┌──────────────────────────────┐
+   │ DuckDB — analytics           │              │ SQLite — app state           │
+   │ rd26, rd25, finance, targets │              │ users, chat, memory, audit   │
+   │ replaced every morning       │              │ survives every refresh       │
+   └──────────────┬───────────────┘              └──────────────────────────────┘
+                  ▲
+   ┌──────────────┴───────────────┐
+   │ Ingestion: GSheets / Excel / │
+   │ sample → typed staging → swap │
+   └──────────────────────────────┘
 ```
 
 ---
@@ -51,14 +70,16 @@ A **standalone, read-only conversational analytics agent** built for educational
 .
 ├── backend/
 │   ├── app/
-│   │   ├── agent/         # Text-to-SQL prompt engineering & LLM runtime
+│   │   ├── agent/         # Router, skills (SKILL.md), tools, tool loop, memory
+│   │   ├── analytics/     # Sealed business logic + shared filters and thresholds
 │   │   ├── api/           # Auth, Chat, and Admin API endpoints
-│   │   ├── core/          # Config, Security (JWT/Bcrypt), and DuckDB connection
-│   │   ├── data/          # Ingestion engines (Excel, GSheets, Sample Data, Registry)
+│   │   ├── core/          # Config, DuckDB (analytics), SQLite (app state), security
+│   │   ├── data/          # Sources, typed ingestion, availability, registry, schema
 │   │   ├── guardrails/    # Injection scanning & PII anonymization
 │   │   ├── streaming/     # SSE streaming & JSON Patch state events
-│   │   ├── main.py        # FastAPI app factory
+│   │   ├── main.py        # FastAPI app factory + refresh scheduler
 │   │   └── models.py      # Request / response Pydantic models
+│   ├── tests/             # Skills, tools, router, memory, explorer, parity, render
 │   ├── requirements.txt   # Python dependencies
 │   └── run.py             # Server entry point (Uvicorn)
 ├── frontend/
@@ -70,9 +91,10 @@ A **standalone, read-only conversational analytics agent** built for educational
 │   │   └── index.css      # Styling & design system
 │   ├── package.json       # Frontend dependencies
 │   └── vite.config.ts     # Vite build configuration
-├── DESIGN.md              # Technical design specifications
+├── DESIGN.md              # Design decisions and how implementation amended them
 ├── RUNNING.md             # Detailed local development guide
-└── README.md              # Documentation
+├── backend/README.md      # Architecture guide: the three contracts, layout, invariants
+└── README.md              # This file
 ```
 
 ---
@@ -101,7 +123,7 @@ pip install -r requirements.txt
 python run.py
 ```
 
-*Note: On initial startup, the backend automatically initializes an admin user (`admin` / `admin123`) and ingests available data.*
+*Note: On initial startup the backend creates an admin user (`admin` / `admin123`), builds both databases and loads the source named by `DATA_SOURCE` (synthetic sample data by default). Chat answers need a model endpoint — see [RUNNING.md](RUNNING.md) §2 for GitHub Models or a local Ollama.*
 
 ---
 
@@ -126,20 +148,24 @@ npm run dev
 | `/auth/login` | `POST` | Authenticate user and receive JWT bearer token |
 | `/chat/stream` | `POST` | Streaming SSE endpoint for natural language query execution |
 | `/chat` | `POST` | Non-streaming JSON endpoint returning complete response state |
-| `/refresh` | `POST` | Reload data into DuckDB from Excel / Google Sheets |
-| `/meta` | `GET` | View database metadata and last refresh timestamp |
+| `/refresh` | `POST` | Reload the analytics tables from the configured source |
+| `/refresh/history` | `GET` | Audit trail of refresh runs, with row counts and errors |
+| `/meta` | `GET` | Freshness, table availability, registered skills and tool count |
 | `/health` | `GET` | System health check endpoint |
 
 ---
 
 ## 🧪 Testing
 
-Run backend tests using Pytest:
-
 ```bash
 cd backend
 pytest tests/
 ```
+
+No model, network access or credentials required, and the suite runs against a temp
+directory so it never touches your local `data/`. It covers skill-definition validity,
+tool schemas and argument validation, keyword routing, memory inheritance, the explorer's
+refusal of writes and PII, analytics invariants, and the render/scheduling logic.
 
 ---
 
