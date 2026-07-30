@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -70,10 +71,19 @@ async def run_loop(message: str, skill: Skill, history: list[dict] | None = None
     schemas = schemas_for(skill.tool_names)
     outcome = LoopOutcome(text="")
     max_iterations = max(1, settings.agent_max_tool_iterations)
+    log.debug("Skill %s offering %s tools", skill.skill_id, len(schemas))
 
     for iteration in range(1, max_iterations + 1):
         outcome.iterations = iteration
-        response = await _complete(client, messages, schemas if schemas else None)
+        started = time.perf_counter()
+        try:
+            response = await _complete(client, messages, schemas if schemas else None)
+        except Exception as e:  # noqa: BLE001 - logged here, handled by the caller
+            log.error("Model call failed on iteration %s (%s): %s", iteration,
+                      settings.llm_model, e)
+            raise
+        log.debug("Model responded in %.0fms (iteration %s)",
+                  (time.perf_counter() - started) * 1000, iteration)
         choice = response.choices[0].message
         calls = getattr(choice, "tool_calls", None) or []
 
@@ -95,7 +105,13 @@ async def run_loop(message: str, skill: Skill, history: list[dict] | None = None
             name = call.function.name
             if progress:
                 progress(_status_for(name))
+            call_started = time.perf_counter()
             result, note = _invoke(name, call.function.arguments, message, slots, skill)
+            elapsed = (time.perf_counter() - call_started) * 1000
+            # One line per tool call is the audit trail for how an answer was produced.
+            log.info("Tool %s(%s) -> %s in %.0fms", name,
+                     _brief(call.function.arguments),
+                     "ok" if result.ok else f"declined: {result.decline_reason()}", elapsed)
             outcome.tool_calls.append(name)
             outcome.results.append(result)
             outcome.notes.extend(note)
@@ -109,6 +125,8 @@ async def run_loop(message: str, skill: Skill, history: list[dict] | None = None
             })
 
     # Cap reached: answer from what we have rather than calling another tool.
+    log.warning("Tool budget of %s iterations spent for skill %s; forcing an answer",
+                max_iterations, skill.skill_id)
     if progress:
         progress("Summarising results...")
     messages.append({
@@ -160,6 +178,14 @@ def _invoke(name: str, raw_arguments: str | None, message: str, slots: dict[str,
     if notes and result.provenance is not None:
         result.provenance.notes.extend(notes)
     return result, notes
+
+
+def _brief(raw_arguments: str | None) -> str:
+    """Tool arguments on one line, short enough to sit inside a log message."""
+    text = " ".join((raw_arguments or "").split())
+    if text in ("", "{}"):
+        return ""
+    return text if len(text) <= 120 else text[:117] + "..."
 
 
 _STATUS = {

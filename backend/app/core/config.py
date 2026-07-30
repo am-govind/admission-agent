@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     api_port: int = 8500
     cors_origins: str = "http://localhost:5173"
 
+    # Logging
+    log_level: str = "INFO"
+    log_format: Literal["text", "json"] = "text"
+    # Empty means console only. A relative path is anchored to backend/.
+    log_file: str = ""
+    log_max_bytes: int = 10_485_760
+    log_backup_count: int = 5
+
     # Auth
     jwt_secret: str = "change-me"
     jwt_expire_minutes: int = 720
@@ -93,6 +101,15 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "agent@example.com"
 
+    @field_validator("log_level")
+    @classmethod
+    def _check_log_level(cls, v: str) -> str:
+        level = v.strip().upper()
+        allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        if level not in allowed:
+            raise ValueError(f"LOG_LEVEL must be one of {sorted(allowed)}, got {v!r}")
+        return level
+
     @field_validator("refresh_at")
     @classmethod
     def _check_refresh_at(cls, v: str) -> str:
@@ -114,6 +131,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def log_file_path(self) -> Path | None:
+        return _resolve(self.log_file) if self.log_file.strip() else None
 
     @property
     def duckdb_file(self) -> Path:

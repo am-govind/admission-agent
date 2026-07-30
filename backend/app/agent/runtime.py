@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -104,7 +105,11 @@ async def run_turn(message: str, conversation_id: str | None = None,
                    history: list[dict] | None = None,
                    progress: Progress | None = None) -> TurnResult:
     """Route the message to one skill, run its tools, and assemble the reply."""
+    started = time.perf_counter()
     slots = memory.load(conversation_id) if conversation_id else {}
+    log.info("Turn starting: %.200s", message)
+    if slots:
+        log.debug("Memory in scope: %s", slots)
 
     if progress:
         progress("Choosing the right skill...")
@@ -116,16 +121,27 @@ async def run_turn(message: str, conversation_id: str | None = None,
         conversation_id=conversation_id, progress=progress)
 
     blocks, provenance = _blocks(outcome.rendered_results)
+    declined = [r.metric for r in outcome.results if not r.ok]
+    if declined:
+        log.info("Declined in this turn: %s", ", ".join(declined))
 
-    text = outcome.text or (
-        "I could not produce an answer for that. Try rephrasing, or ask for a specific "
-        "metric such as registrations, 2nd EMI collection or ARPU.")
+    text = outcome.text
+    if not text:
+        log.warning("The model returned no text after %s tool call(s)",
+                    len(outcome.tool_calls))
+        text = ("I could not produce an answer for that. Try rephrasing, or ask for a "
+                "specific metric such as registrations, 2nd EMI collection or ARPU.")
     note = availability.staleness_note()
     if note:
+        log.warning("Serving with a staleness warning: %s", note)
         text = f"{note}\n\n{text}"
 
     if conversation_id:
         await memory.update_summary(conversation_id)
+
+    log.info("Turn done in %.0fms: skill=%s tools=[%s] blocks=%s chars=%s",
+             (time.perf_counter() - started) * 1000, route.skill_id,
+             ", ".join(outcome.tool_calls), len(blocks), len(text))
 
     return TurnResult(
         text=text,

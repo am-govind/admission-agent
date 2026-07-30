@@ -111,4 +111,4 @@ def test_run_wraps_analytics_failure_as_not_ok():
     """A crash inside analytics must become a decline, not a 500 mid-conversation."""
     result = get_tool("explore_data").run({"sql": "SELECT * FROM no_such_table"})
     assert not result.ok
-    assert result.unavailable_reason or result.error
+    assert result.decline_reason()

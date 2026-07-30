@@ -96,23 +96,29 @@ def explore(sql: str, limit: int | None = None) -> ToolResult:
     try:
         validate(sql)
     except ExplorerError as e:
+        # A refusal here is the guardrail doing its job, and is the single most useful
+        # line in the log when reviewing what model-written SQL tried to do.
+        log.warning("Explorer refused a query (%s): %.300s", e, sql)
         return ToolResult.unavailable(_METRIC, str(e))
 
     cap = max(1, min(int(limit or settings.explorer_max_rows), settings.explorer_max_rows))
     # Wrapping is simpler and safer than trying to detect or rewrite an existing LIMIT.
     guarded = f"SELECT * FROM ({sql.strip().rstrip(';')}) AS _guarded LIMIT {cap}"
 
+    log.info("Explorer query (cap %s): %.300s", cap, " ".join(sql.split()))
     try:
         with readonly_conn() as conn:
             cursor = conn.execute(guarded)
             columns = [d[0] for d in cursor.description] if cursor.description else []
             rows = cursor.fetchall()
     except duckdb.Error as e:
+        log.warning("Explorer query failed: %s", e)
         return ToolResult.unavailable(_METRIC, f"the query could not run: {e}")
 
     pattern = _pii_pattern()
     leaked = [c for c in columns if pattern.search(c)]
     if leaked:
+        log.warning("Explorer result withheld; personal data in columns %s", leaked)
         return ToolResult.unavailable(
             _METRIC, f"the result exposes personal data column(s): {', '.join(leaked)}")
 

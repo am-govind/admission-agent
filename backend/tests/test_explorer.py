@@ -64,7 +64,7 @@ def test_pii_columns_are_refused():
 
 def test_a_plain_select_works():
     result = explorer.explore("SELECT region, COUNT(*) AS students FROM rd26 GROUP BY region")
-    assert result.ok, result.unavailable_reason or result.error
+    assert result.ok, result.decline_reason()
     assert result.columns == ["region", "students"]
     assert result.rows
 
@@ -73,7 +73,7 @@ def test_a_with_clause_works():
     result = explorer.explore(
         "WITH per_region AS (SELECT region, COUNT(*) AS n FROM rd26 GROUP BY region) "
         "SELECT * FROM per_region ORDER BY n DESC")
-    assert result.ok, result.unavailable_reason or result.error
+    assert result.ok, result.decline_reason()
 
 
 def test_row_cap_is_enforced():

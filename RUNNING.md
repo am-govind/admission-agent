@@ -24,6 +24,23 @@ A model endpoint is needed for chat answers — either a GitHub token (§2a) or 
 
 ---
 
+## Checklist — everything working, in order
+
+Each step is verifiable on its own, so a failure tells you exactly which one broke.
+
+| # | Step | You are done when |
+|---|------|-------------------|
+| 1 | Create the venv and install (§1) | `pytest -q` passes |
+| 2 | `cp .env.example .env`, set `JWT_SECRET` and `BOOTSTRAP_ADMIN_PASSWORD` (§1c) | startup logs no longer warn about defaults |
+| 3 | Choose `DATA_SOURCE` (§5) | startup logs `Loaded <n> rows into rd26` |
+| 4 | Start the backend (§1) | `curl /health` returns `{"status":"ok"}` |
+| 5 | Log in and check `/meta` (§1) | `stale` is `false` and `rowCounts` is non-empty |
+| 6 | Configure a model endpoint (§2) | `POST /chat` returns an answer, not "the language model is not configured" |
+| 7 | Start the frontend (§3) | a question returns prose plus a table or chart |
+| 8 | Confirm the schedule (§6) | `/meta` shows `refreshAt` and `refreshDue: false` after a successful load |
+
+---
+
 ## 1. Backend
 
 ```bash
@@ -192,10 +209,48 @@ To work from a local export instead, set `DATA_SOURCE=excel` and
 
 ---
 
-## 6. Troubleshooting
+## 6. Logs — reading what the agent did
+
+Everything goes to the console by default, one line per event, each tagged with a request
+id that ties a whole turn together:
+
+```
+INFO app.agent.runtime [72570db92f32] Turn starting: how many registrations this month?
+INFO app.agent.runtime [72570db92f32] Routed to admissions via keyword (matched registrations, this month)
+INFO app.agent.loop    [72570db92f32] Tool get_monthly_admissions() -> ok in 34ms
+INFO app.agent.runtime [72570db92f32] Turn done in 812ms: skill=admissions tools=[get_monthly_admissions] blocks=2 chars=412
+INFO app.main          [72570db92f32] POST /chat -> 200 in 818ms
+```
+
+The same id is returned as the `X-Request-Id` response header, so a specific bad answer
+can be found in the log rather than searched for by timestamp.
+
+Useful settings in `backend/.env`:
+
+```
+LOG_LEVEL=DEBUG              # adds model round-trip timings and the memory slots in scope
+LOG_FILE=./data/agent.log    # rotating file alongside the console (10MB x 5)
+LOG_FORMAT=json              # one JSON object per line, for deployment
+```
+
+Then, to follow just one turn:
+
+```bash
+tail -f backend/data/agent.log | grep 72570db92f32
+```
+
+At startup the log states which databases and data source are in use, and warns if
+`JWT_SECRET` or the admin password are still at their defaults. Login attempts, blocked
+inputs, every ad-hoc SQL query and each refusal are recorded, which is what makes the
+per-user audit trail real rather than aspirational.
+
+---
+
+## 7. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
+| No log output at all beyond uvicorn's own lines | an older `run.py`, or the app started some other way | start with `python run.py`, or call `setup_logging()` before your own `uvicorn.run` |
 | Chat replies "the language model is not configured" | no `GITHUB_TOKEN` / `LLM_API_KEY` | set one per §2, then restart |
 | `/chat` → `503` | the configured endpoint is unreachable | check `LLM_BASE_URL`; for Ollama make sure `ollama serve` is running |
 | `ModuleNotFoundError: fastapi` | venv not activated / deps not installed | `source .venv/bin/activate && pip install -r requirements.txt` |
@@ -206,10 +261,11 @@ To work from a local export instead, set `DATA_SOURCE=excel` and
 | Refresh fails with a 404 from Google | workbook not shared with the service account | share it with the key's `client_email` |
 | `JSONDecodeError` reading the service-account key | the key file is malformed | re-download it; the `private_key` newlines must be intact |
 | Frontend loads but calls fail | backend not running / wrong port | ensure the backend is on `:8500`; the Vite proxy targets that port |
+| An answer looks wrong and you need to know why | — | find the turn by its `X-Request-Id`; the log lists the skill chosen and every tool call with its arguments |
 
 ---
 
-## 7. Quick start (all together)
+## 8. Quick start (all together)
 
 ```bash
 # terminal 1 — backend

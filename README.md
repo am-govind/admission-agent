@@ -15,6 +15,7 @@ The model does **not** write SQL for a business metric. It picks a skill, the sk
 - **🧵 Conversation Memory**: Slot-based memory means "and for Pune?" works, and any scope inherited from an earlier turn is stated in the provenance rather than applied silently.
 - **🛡️ Guardrails & PII Masking**: Prompt-injection screening on input, PII masking on output, and an ad-hoc SQL path that is `SELECT`-only, row-capped and PII-denied on a read-only connection with file access disabled.
 - **📡 Real-Time SSE Streaming**: Fine-grained JSON-Patch updates, with a status line per tool call.
+- **🔍 Traceable Logging**: Every line carries a request id, echoed as `X-Request-Id`, so one chat turn reads as a single story — skill chosen, each tool call with its arguments and duration, and the answer. Login attempts, blocked inputs and refused SQL are recorded as the audit trail.
 - **🎨 Modern UI**: React + Vite + TypeScript + Tailwind, rendering native table and chart blocks (Recharts) rather than markdown the model retyped.
 
 ---
@@ -73,7 +74,7 @@ The model does **not** write SQL for a business metric. It picks a skill, the sk
 │   │   ├── agent/         # Router, skills (SKILL.md), tools, tool loop, memory
 │   │   ├── analytics/     # Sealed business logic + shared filters and thresholds
 │   │   ├── api/           # Auth, Chat, and Admin API endpoints
-│   │   ├── core/          # Config, DuckDB (analytics), SQLite (app state), security
+│   │   ├── core/          # Config, logging, DuckDB (analytics), SQLite (app state), security
 │   │   ├── data/          # Sources, typed ingestion, availability, registry, schema
 │   │   ├── guardrails/    # Injection scanning & PII anonymization
 │   │   ├── streaming/     # SSE streaming & JSON Patch state events

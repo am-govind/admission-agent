@@ -124,6 +124,16 @@ class ToolResult:
     def has_table(self) -> bool:
         return bool(self.columns and self.rows)
 
+    def decline_reason(self) -> str:
+        """Why this result is not ok, as one string, for logs and assertion messages.
+
+        Callers otherwise have to remember which of the two mutually exclusive fields
+        was set, and a wrong guess produces a misleading empty message.
+        """
+        if self.ok:
+            return ""
+        return self.unavailable_reason or self.clarification or "no reason given"
+
     def table_payload(self) -> dict[str, Any]:
         return {
             "columns": list(self.columns),

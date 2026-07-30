@@ -7,6 +7,7 @@ from typing import AsyncIterator
 
 from ..agent.memory import history_for_prompt
 from ..agent.runtime import run_turn
+from ..core.logs import bind_conversation
 from ..data.conversation import add_message, next_turn
 from ..guardrails import GuardrailError, scan_input, scan_output
 from . import events
@@ -22,6 +23,7 @@ async def stream_turn(message: str, conversation_id: str) -> AsyncIterator[str]:
     thread_id = conversation_id
     run_id = f"run-{uuid.uuid4().hex[:10]}"
     message_id = f"msg-{uuid.uuid4().hex[:10]}"
+    bind_conversation(conversation_id)
 
     yield events.run_started(thread_id, run_id, conversation_id, message_id)
     yield events.thinking_start()

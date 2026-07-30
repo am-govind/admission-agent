@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from ..agent.memory import history_for_prompt
 from ..agent.runtime import run_turn
+from ..core.logs import bind_conversation
 from ..core.security import current_user
 from ..data import conversation
 from ..guardrails import GuardrailError, scan_input, scan_output
@@ -41,6 +42,7 @@ async def chat(body: ChatRequest, user: str = Depends(current_user)) -> ChatResp
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     cid = conversation.ensure_conversation(body.conversationId, user)
+    bind_conversation(cid)
     turn = conversation.next_turn(cid)
     conversation.add_message(cid, turn, "user", body.message)
     history = history_for_prompt(cid)

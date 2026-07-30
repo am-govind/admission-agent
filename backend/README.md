@@ -127,6 +127,7 @@ app/
 │
 ├── core/                FOUNDATIONS
 │   ├── config.py          settings from .env
+│   ├── logs.py            logging config + per-request correlation ids
 │   ├── database.py        DuckDB: read-write plus a read-only snapshot for the explorer
 │   ├── appdb.py           SQLite app state
 │   ├── migrate.py         one-time move out of the pre-split DuckDB file
@@ -154,6 +155,52 @@ The scheduler is catch-up driven rather than sleep-until: it compares a persiste
 `last_success` against the most recent elapsed 08:30 Asia/Kolkata cutoff, so a process
 that was down at 08:30 refreshes as soon as it is back, and one that was up refreshes
 exactly once.
+
+## Logging
+
+`core/logs.py` owns configuration. Nothing else calls `basicConfig`, and every module
+just does `log = logging.getLogger(__name__)`, so the logger name tells you which layer a
+line came from.
+
+Each line carries a **request id**, held in a context variable and stamped on by a filter
+attached to the handler — so records from uvicorn and third-party libraries carry it too.
+The id is also returned as the `X-Request-Id` response header, and an inbound
+`X-Request-Id` is honoured, so a user reporting "that answer was wrong at 3pm" can be
+traced without guessing from timestamps. One chat turn reads as a single story:
+
+```
+INFO app.core.security  [4f2127d02d4d] Login succeeded for 'admin'
+INFO app.main           [4f2127d02d4d] POST /auth/login -> 200 in 231ms
+INFO app.agent.runtime  [72570db92f32] Turn starting: how many registrations this month?
+INFO app.agent.runtime  [72570db92f32] Routed to admissions via keyword (matched registrations, this month)
+INFO app.agent.loop     [72570db92f32] Tool get_monthly_admissions() -> ok in 34ms
+INFO app.agent.runtime  [72570db92f32] Turn done in 812ms: skill=admissions tools=[get_monthly_admissions] blocks=2 chars=412
+INFO app.main           [72570db92f32] POST /chat -> 200 in 818ms
+```
+
+What is deliberately logged, and why:
+
+| Event | Level | Why it matters |
+|---|---|---|
+| Login success and failure | INFO / WARNING | The data is student PII, so who queried it is part of the audit trail |
+| Blocked input, with the rule that fired | WARNING | A guardrail block is a security event worth reviewing |
+| Explorer query, and every refusal | INFO / WARNING | The only place model-written SQL reaches the database |
+| One line per tool call, with arguments and duration | INFO | How a given number was produced, and what was slow |
+| Tool budget exhausted | WARNING | The model is looping instead of answering |
+| Serving stale data | WARNING | Pairs with the warning the user sees in the reply |
+| Insecure defaults at startup | WARNING | Default `JWT_SECRET` or admin password in a real deployment |
+| Refresh outcome and per-table row counts | INFO | Whether this morning's data actually landed |
+
+`LOG_LEVEL=DEBUG` adds model round-trip timings and the memory slots in scope. Set
+`LOG_FORMAT=json` for one object per line, `LOG_FILE=./data/agent.log` to add a rotating
+file alongside the console. Noisy libraries (`httpx`, `openai`, `googleapiclient`) are
+capped at WARNING so they cannot bury the application's own lines.
+
+Two caveats worth knowing. `run.py` passes `log_config=None` to uvicorn, because
+uvicorn's default configuration would otherwise replace the formatter and drop the
+request id; uvicorn's access log is disabled for the same reason, since the middleware
+logs the same information with the id attached. And `/health` is not logged, because a
+monitor polling it would drown everything else.
 
 ## Adding a skill
 
@@ -198,3 +245,4 @@ unreachable.
 | `test_explorer.py` | writes, escapes, multi-statement and PII attempts all refused |
 | `test_parity.py` | analytics invariants, plus a golden-value harness for the workbook |
 | `test_render.py` | table/chart block shapes, dedupe, refresh catch-up logic |
+| `test_logs.py` | logging config is idempotent, correlation ids reach the output |

@@ -24,7 +24,7 @@ GOLDEN: dict[tuple[str, str | None], float] = {}
 
 
 def value(result: ToolResult, key: str = "value") -> float:
-    assert result.ok, result.unavailable_reason or result.error
+    assert result.ok, result.decline_reason()
     assert key in result.values, f"{result.metric} has no {key!r} in {list(result.values)}"
     return float(result.values[key])
 
