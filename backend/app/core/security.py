@@ -1,0 +1,66 @@
+"""User-table authentication: bcrypt password hashing + JWT bearer tokens.
+
+Chosen over a shared secret to keep a per-user audit trail (who queried what),
+which matters because the underlying data contains student PII.
+"""
+from __future__ import annotations
+
+import datetime as dt
+
+import bcrypt
+import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from .config import settings
+from .database import execute, get_conn, _lock
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def hash_password(password: str) -> str:
+    # bcrypt operates on the first 72 bytes; truncate explicitly to avoid errors.
+    return bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8")[:72], hashed.encode("utf-8"))
+    except ValueError:
+        return False
+
+
+def create_user(username: str, password: str) -> None:
+    conn = get_conn()
+    with _lock:
+        conn.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?, ?)",
+                     [username, hash_password(password)])
+
+
+def bootstrap_admin() -> None:
+    rows = execute("SELECT COUNT(*) FROM users")
+    if rows and rows[0][0] == 0:
+        create_user(settings.bootstrap_admin_user, settings.bootstrap_admin_password)
+
+
+def authenticate(username: str, password: str) -> bool:
+    rows = execute("SELECT password_hash FROM users WHERE username = ?", [username])
+    if not rows:
+        return False
+    return verify_password(password, rows[0][0])
+
+
+def issue_token(username: str) -> str:
+    exp = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=settings.jwt_expire_minutes)
+    payload = {"sub": username, "exp": exp}
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+def current_user(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> str:
+    if creds is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+    try:
+        payload = jwt.decode(creds.credentials, settings.jwt_secret, algorithms=["HS256"])
+        return payload["sub"]
+    except jwt.PyJWTError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired token")
