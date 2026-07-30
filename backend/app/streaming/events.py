@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from typing import Any
 
 
@@ -55,6 +56,14 @@ def add_block(block: dict[str, Any]) -> str:
         {"op": "add", "path": f"/contentBlocks/{block['id']}", "value": block},
         {"op": "add", "path": "/parts/-", "value": {"type": "block-ref", "id": block["id"]}},
     ])
+
+
+def add_text_part(content: str) -> str:
+    """JSON-Patch to append a standalone text part (used for the provenance footnote)."""
+    return state_delta([{
+        "op": "add", "path": "/parts/-",
+        "value": {"type": "text", "id": f"text-{uuid.uuid4().hex[:8]}", "content": content},
+    }])
 
 
 def run_finished(thread_id: str, run_id: str, metadata: dict[str, Any] | None = None) -> str:
