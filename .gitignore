@@ -1,0 +1,28 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+*.pyo
+backend/.env
+backend/data/
+backend/secrets/
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/tsconfig.tsbuildinfo
+
+# Data, Reports & Credentials — never commit
+.env
+*.pem
+business-copilot-*.json
+TRY.xlsx
+*.xlsx
+Business_Logic_Report_DETAILED.pdf
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
