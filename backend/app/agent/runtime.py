@@ -1,84 +1,139 @@
-"""Turn orchestration for Text-to-SQL agent."""
+"""Turn orchestration: guardrails -> memory -> router -> loop -> render blocks.
+
+Tables and charts are emitted as native content blocks rather than as markdown inside
+the reply, so the frontend renders a real table and a real chart, and the model is not
+asked to format data it might reformat incorrectly.
+"""
 from __future__ import annotations
+
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from decimal import Decimal
+
+from ..analytics.result import ToolResult, jsonable
+from ..data import availability
 from ..models import ContentBlock
-from ..core.database import execute_dicts
+from . import loop, memory, router
+from .loop import Progress
 
 log = logging.getLogger(__name__)
 
-_CHART_KINDS = {"bar", "line", "area", "pie"}
-_MAX_CHART_ROWS = 50
 
 @dataclass
 class TurnResult:
     text: str
-    skill_id: str = "sql_agent"
-    skill_name: str = "Text-to-SQL"
-    route_reason: str = "Unified Agent"
+    skill_id: str = "knowledge"
+    skill_name: str = "Knowledge"
+    route_reason: str = ""
+    route_method: str = "keyword"
     artifacts: list[ContentBlock] = field(default_factory=list)
     provenance: list[str] = field(default_factory=list)
+    tool_calls: list[str] = field(default_factory=list)
 
-def _with_history(message: str, history: list[dict] | None) -> str:
-    if history:
-        hist = "\n".join(f"{h['role']}: {h['content']}" for h in history[-6:])
-        return f"[Recent conversation]\n{hist}\n\n[User]\n{message}"
-    return message
 
-def _to_markdown_table(cols: list[str], rows: list[dict]) -> str:
-    if not rows: return "No results found."
-    header = "| " + " | ".join(cols) + " |"
-    sep = "| " + " | ".join("---" for _ in cols) + " |"
-    body = "\n".join("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |" for r in rows)
-    return f"{header}\n{sep}\n{body}"
+def _table_block(result: ToolResult) -> ContentBlock:
+    payload = result.table_payload()
+    return ContentBlock(
+        id=f"table-{uuid.uuid4().hex[:8]}",
+        type="table",
+        data={"columns": payload["columns"], "rows": payload["rows"],
+              "title": result.chart.title if result.chart else ""},
+    )
 
-def _is_number(v) -> bool:
-    return isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
 
-def _jsonable(v):
-    """DuckDB hands back Decimal/date objects that json.dumps cannot serialize."""
-    if v is None: return None  # Recharts renders null as a gap rather than a zero.
-    if isinstance(v, Decimal): return float(v)
-    return v if _is_number(v) else str(v)
-
-def _chart_block(cols: list[str], rows: list[dict], spec: dict | None) -> ContentBlock | None:
-    """Chart the result set, honouring the model's spec when it names real columns."""
-    if len(cols) < 2 or not 1 < len(rows) <= _MAX_CHART_ROWS:
+def _chart_block(result: ToolResult) -> ContentBlock | None:
+    """Chart the result when the spec names real columns and there is enough to plot."""
+    spec = result.chart
+    if spec is None or not result.rows:
         return None
-    numeric = [c for c in cols
-               if (vals := [r[c] for r in rows if r.get(c) is not None]) and all(map(_is_number, vals))]
-    spec = spec if isinstance(spec, dict) else {}
-    x = spec.get("x") if spec.get("x") in cols else next((c for c in cols if c not in numeric), None)
-    wanted = spec.get("y") or []
-    wanted = [wanted] if isinstance(wanted, str) else wanted
-    # x is excluded from y so a numeric x-axis (e.g. month number) is not also drawn as a series.
-    y = [c for c in wanted if c in numeric and c != x] or [c for c in numeric if c != x]
-    if not x or not y:
+    columns = list(result.columns)
+    if spec.x not in columns:
         return None
+    series = [c for c in spec.y if c in columns and c != spec.x]
+    if not series or len(result.rows) < 2:
+        return None
+
+    index = {name: i for i, name in enumerate(columns)}
+    rows: list[dict] = []
+    for row in result.rows:
+        # Subtotal and grand-total rows would dwarf every real bar.
+        label = str(row[index[spec.x]])
+        if label.lower() in {"grand total", "subtotal", "total"}:
+            continue
+        rows.append({spec.x: jsonable(row[index[spec.x]]),
+                     **{c: jsonable(row[index[c]]) for c in series}})
+    if len(rows) < 2:
+        return None
+
     return ContentBlock(
         id=f"chart-{uuid.uuid4().hex[:8]}",
         type="chart",
-        data={
-            "kind": spec.get("kind") if spec.get("kind") in _CHART_KINDS else "bar",
-            "x": x, "y": y, "title": str(spec.get("title") or ""),
-            "rows": [{c: _jsonable(r.get(c)) for c in [x, *y]} for r in rows],
-        },
+        data={"kind": spec.to_dict()["kind"], "x": spec.x, "y": series,
+              "title": spec.title, "rows": rows},
     )
 
-async def run_turn(message: str, history: list[dict] | None = None) -> TurnResult:
-    from .sql_agent import run_sql_agent
 
-    response = await run_sql_agent(_with_history(message, history))
-    if not response.sql_query:
-        return TurnResult(text="Sorry, I couldn't understand the model's response format.")
+def _blocks(results: list[ToolResult]) -> tuple[list[ContentBlock], list[str]]:
+    blocks: list[ContentBlock] = []
+    provenance: list[str] = []
+    seen: set[str] = set()
 
-    try:
-        cols, rows = execute_dicts(response.sql_query)
-    except Exception as e:
-        log.error(f"SQL error: {e}\nQuery: {response.sql_query}\nThought: {response.thought_process}")
-        return TurnResult(text="Sorry, I couldn't process that question. Please try rephrasing it.")
+    for result in results:
+        if result.provenance is not None:
+            description = result.provenance.describe()
+            if description not in provenance:
+                provenance.append(description)
+        if not result.has_table:
+            continue
+        # The same tool called twice in a turn must not render the same table twice.
+        fingerprint = json.dumps(
+            [result.metric, result.columns, result.table_payload()["rows"]],
+            ensure_ascii=False, default=str)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        chart = _chart_block(result)
+        if chart is not None:
+            blocks.append(chart)
+        blocks.append(_table_block(result))
+    return blocks, provenance
 
-    chart = _chart_block(cols, rows, response.chart)
-    return TurnResult(text=_to_markdown_table(cols, rows), artifacts=[chart] if chart else [])
+
+async def run_turn(message: str, conversation_id: str | None = None,
+                   history: list[dict] | None = None,
+                   progress: Progress | None = None) -> TurnResult:
+    """Route the message to one skill, run its tools, and assemble the reply."""
+    slots = memory.load(conversation_id) if conversation_id else {}
+
+    if progress:
+        progress("Choosing the right skill...")
+    route = await router.route(message, history)
+    log.info("Routed to %s via %s (%s)", route.skill_id, route.method, route.reason)
+
+    outcome = await loop.run_loop(
+        message=message, skill=route.skill, history=history, slots=slots,
+        conversation_id=conversation_id, progress=progress)
+
+    blocks, provenance = _blocks(outcome.rendered_results)
+
+    text = outcome.text or (
+        "I could not produce an answer for that. Try rephrasing, or ask for a specific "
+        "metric such as registrations, 2nd EMI collection or ARPU.")
+    note = availability.staleness_note()
+    if note:
+        text = f"{note}\n\n{text}"
+
+    if conversation_id:
+        await memory.update_summary(conversation_id)
+
+    return TurnResult(
+        text=text,
+        skill_id=route.skill_id,
+        skill_name=route.skill.name,
+        route_reason=route.reason,
+        route_method=route.method,
+        artifacts=blocks,
+        provenance=provenance,
+        tool_calls=outcome.tool_calls,
+    )
