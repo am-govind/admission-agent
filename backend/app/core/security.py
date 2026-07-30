@@ -12,8 +12,8 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from . import appdb
 from .config import settings
-from .database import execute, get_conn, _lock
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -31,23 +31,24 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 def create_user(username: str, password: str) -> None:
-    conn = get_conn()
-    with _lock:
-        conn.execute("INSERT OR REPLACE INTO users (username, password_hash) VALUES (?, ?)",
-                     [username, hash_password(password)])
+    appdb.execute(
+        "INSERT INTO users (username, password_hash) VALUES (?, ?) "
+        "ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash",
+        [username, hash_password(password)],
+    )
 
 
 def bootstrap_admin() -> None:
-    rows = execute("SELECT COUNT(*) FROM users")
-    if rows and rows[0][0] == 0:
+    row = appdb.query_one("SELECT COUNT(*) FROM users")
+    if row and row[0] == 0:
         create_user(settings.bootstrap_admin_user, settings.bootstrap_admin_password)
 
 
 def authenticate(username: str, password: str) -> bool:
-    rows = execute("SELECT password_hash FROM users WHERE username = ?", [username])
-    if not rows:
+    row = appdb.query_one("SELECT password_hash FROM users WHERE username = ?", [username])
+    if not row:
         return False
-    return verify_password(password, rows[0][0])
+    return verify_password(password, row[0])
 
 
 def issue_token(username: str) -> str:
