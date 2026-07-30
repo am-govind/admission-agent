@@ -5,15 +5,18 @@ import asyncio
 import uuid
 from typing import AsyncIterator
 
+from ..agent.memory import history_for_prompt
 from ..agent.runtime import run_turn
-from ..data.conversation import add_message, get_history, next_turn
+from ..data.conversation import add_message, next_turn
 from ..guardrails import GuardrailError, scan_input, scan_output
 from . import events
+
 
 def _chunk(text: str, size: int = 3) -> list[str]:
     words = text.split(" ")
     return [" ".join(words[i:i + size]) + (" " if i + size < len(words) else "")
             for i in range(0, len(words), size)]
+
 
 async def stream_turn(message: str, conversation_id: str) -> AsyncIterator[str]:
     thread_id = conversation_id
@@ -32,37 +35,55 @@ async def stream_turn(message: str, conversation_id: str) -> AsyncIterator[str]:
 
     turn = next_turn(conversation_id)
     add_message(conversation_id, turn, "user", message)
-    history = get_history(conversation_id)
+    history = history_for_prompt(conversation_id)
 
-    yield events.processing_status("Writing SQL query...")
+    # The turn reports progress through a queue so each tool call can be surfaced while
+    # the turn is still running, without run_turn needing to be a generator.
+    updates: asyncio.Queue[str] = asyncio.Queue()
+    task = asyncio.create_task(
+        run_turn(message, conversation_id, history, progress=updates.put_nowait))
+
+    while not task.done():
+        try:
+            status = await asyncio.wait_for(updates.get(), timeout=0.2)
+        except asyncio.TimeoutError:
+            continue
+        yield events.processing_status(status)
+    while not updates.empty():
+        yield events.processing_status(updates.get_nowait())
 
     try:
-        output = await run_turn(message, history)
-    except Exception as e:
+        output = task.result()
+    except Exception as e:  # noqa: BLE001 - the client needs one clean error frame
         yield events.thinking_end()
         yield events.run_error(thread_id, run_id, "AGENT_ERROR", f"Service unavailable: {e}")
         return
 
-    try:
-        scan_output(output.text)
-    except GuardrailError as e:
-        yield events.thinking_end()
-        yield events.run_error(thread_id, run_id, "OUTPUT_BLOCKED", str(e))
-        return
+    # scan_output returns the masked text; using the return value is the whole point.
+    answer = scan_output(output.text)
 
     yield events.thinking_end()
 
-    # Charts go above the table so the visual lands first.
+    # Charts and tables first so the visual lands before the prose.
     for block in output.artifacts:
         yield events.add_block(block.model_dump())
 
-    # Stream text chunks
     part_id = f"part-{uuid.uuid4().hex[:10]}"
     yield events.text_message_start(part_id)
-    for chunk in _chunk(output.text):
+    for chunk in _chunk(answer):
         yield events.text_message_content(part_id, chunk)
         await asyncio.sleep(0.02)
     yield events.text_message_end(part_id)
 
-    add_message(conversation_id, turn, "assistant", output.text)
-    yield events.run_finished(thread_id, run_id)
+    stored = answer
+    if output.provenance:
+        provenance = "How I got this: " + " | ".join(dict.fromkeys(output.provenance))
+        yield events.add_text_part(provenance)
+        stored = f"{answer}\n\n{provenance}"
+
+    add_message(conversation_id, turn, "assistant", stored)
+    yield events.run_finished(thread_id, run_id, {
+        "skill": output.skill_id, "skillName": output.skill_name,
+        "routeReason": output.route_reason, "routeMethod": output.route_method,
+        "toolCalls": output.tool_calls,
+    })
