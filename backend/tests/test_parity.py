@@ -130,9 +130,15 @@ def test_unknown_center_asks_for_clarification():
 
 
 def test_ambiguous_center_offers_candidates():
-    result = admissions.fresh_registrations(center="Mumbai")
-    if result.clarification:
-        assert result.candidates, "an ambiguous center must list the options"
+    """"Kalyan" names centers in two cities, so it cannot be aggregated or guessed.
+
+    Deliberately not "Mumbai": that resolves to a city group now, which would make the
+    conditional below vacuous and quietly retire the assertion.
+    """
+    result = admissions.fresh_registrations(center="Kalyan")
+    assert not result.ok
+    assert result.clarification
+    assert result.candidates, "an ambiguous center must list the options"
 
 
 # ---------- golden values ----------
