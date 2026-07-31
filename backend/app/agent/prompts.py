@@ -36,6 +36,12 @@ Non-negotiable rules:
 7. All periods are measured from the reference date (the latest admission in the data),
    not from today. Name the month or date you are reporting so it is unambiguous.
 8. Money is in Indian rupees. Write large amounts as ₹1,23,456 or in crores.
+9. To compare scopes, make one call with the tool's `compare` parameter rather than one
+   call per scope. It returns a single chart with a line per scope, which is what makes
+   a comparison readable. Fall back to separate calls only when a scope needs `exclude`.
+10. A city name such as "Pune" covers every center in that city and needs no
+   clarification. State the scope label the tool returned, "Pune (6 centers)", so the
+   user can see what was counted.
 """
 
 
@@ -56,9 +62,14 @@ def data_context() -> str:
                      f"columns {', '.join(columns)}")
 
     regions = registry.all_regions()
+    cities = registry.all_cities()
     centers = registry.all_centers()
     if regions:
         lines.append(f"\nRegions: {', '.join(regions)}")
+    if cities:
+        # Named explicitly because a city is a valid scope on its own, and the model
+        # would otherwise have to infer that from the center names.
+        lines.append(f"Cities (usable as a center scope): {', '.join(cities)}")
     if centers:
         lines.append(f"Centers ({len(centers)}): {', '.join(centers)}")
     lines.append(f"\nReference date: {reference_date().isoformat()}")

@@ -175,6 +175,23 @@ curl -s -X POST http://localhost:8500/chat \
   -d '{"message":"how many fresh registrations this month?"}'
 ```
 
+### 2d. Surviving a flaky provider
+
+Free endpoints return 429s and 5xx regularly, and some report a server error as a `200`
+whose `choices` is `null`. Every model call retries before giving up, then walks a list of
+alternates:
+
+```
+LLM_MAX_RETRIES=3                 # attempts per model
+LLM_RETRY_BASE_DELAY=0.8          # seconds; doubles each attempt, plus jitter
+LLM_FALLBACK_MODELS=model/a:free,model/b:free
+```
+
+Fallbacks are tried in order after the primary runs out of attempts, and must also support
+tool calling. If every model fails *after* some tools have already run, the turn still
+answers from those results and says the write-up is missing — the charts and tables render
+either way, because the numbers were already computed.
+
 ---
 
 ## 3. Frontend
@@ -281,9 +298,10 @@ per-user audit trail real rather than aspirational.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | No log output at all beyond uvicorn's own lines | an older `run.py`, or the app started some other way | start with `python run.py`, or call `setup_logging()` before your own `uvicorn.run` |
-| Chat replies "the language model is not configured" | no `GITHUB_TOKEN` / `LLM_API_KEY` | set one per §2, then restart |
 | Chat replies "the language model is not configured" | no `LLM_API_KEY` | set one per §2, then restart |
 | `/chat` → `503` | the configured endpoint is unreachable | check `LLM_BASE_URL`; for Ollama make sure `ollama serve` is running |
+| A reply opens "I could not reach the language model" but the figures and charts are there | the provider failed after the tools ran; the answer was assembled from the tool summaries | the numbers are correct — retry for the prose, or add `LLM_FALLBACK_MODELS` per §2d |
+| "The language model is not responding right now" | every model in the chain failed before any tool ran | check the provider's status and your daily cap; the log names each attempt |
 | `/chat` → `410`, or an error naming `github_models_retirement_brownout` | `.env` still points at the retired GitHub Models | switch `LLM_BASE_URL` and `LLM_MODEL` per §2a |
 | Replies ignore your data and answer only in generalities | the chosen model has no tool-calling support | pick one from the §2a list; free models without `tools` cannot query anything |
 | `404` naming the model, on OpenRouter | dropped the `:free` suffix, or the model was withdrawn | re-run the model-list command in §2a |

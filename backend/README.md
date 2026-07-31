@@ -31,7 +31,8 @@ layer over DuckDB, and streams tables and charts back to the browser.
   ToolResult ── values + optional table/chart + provenance
        │
        ▼
-  RUNTIME ───── native table and chart blocks, staleness note, provenance line
+  RUNTIME ───── native table and chart blocks, comparable series merged into one
+                chart, staleness note, provenance line
 ```
 
 Three contracts hold it together:
@@ -65,6 +66,66 @@ that literal in a wrapper is a second source of truth that will drift.
 `tests/test_tools.py` fails the build if any threshold from `analytics/filters.py`
 appears under `agent/tools/`.
 
+## Naming a scope
+
+`analytics/filters.py` turns free text into SQL predicates. Four kinds of scope resolve;
+anything ambiguous or unrecognised declines instead.
+
+| Input | Resolves to | Label |
+|---|---|---|
+| `center="Panvel"` | one center | `Mumbai - Panvel Vidyapeeth` |
+| `center="Pune"` | every center in that city | `Pune (6 centers)` |
+| `region="Maharashtra"` | one region | `Maharashtra region` |
+| `region="Maharashtra", exclude="Mumbai"` | the region minus a city | `Maharashtra region excluding Mumbai (17 centers)` |
+
+Centers are named by city (`Pune - FC Road Vidyapeeth`), so a term matching several
+centers of the *same* city is not ambiguous — "Pune" means all six, and asking which one
+was meant is the wrong question. A term spanning two cities is genuinely ambiguous and
+still asks: `"Kalyan"` exists in both Dombivali and Mumbai. Exact center and region names
+always win before any grouping is considered, so `"Nagpur Vidyapeeth"` is that one center
+rather than the Nagpur group.
+
+Aggregating trades a clarifying question for an assumption, so the center count is part
+of the label and travels into the chart title and the provenance line. The scope is
+always visible in the answer.
+
+`exclude` exists because "Mumbai versus the rest of Maharashtra" cannot be answered by
+subtracting two figures — the excluded centers are in both totals. It has to be a
+predicate, and `tests/test_scope.py` asserts the part plus the rest equals the whole.
+
+## When the model is unreachable
+
+`agent/llm.py` is the only place a model is called. Free endpoints fail transiently, and
+some report a server error as a `200` whose `choices` is `null`, which used to surface as
+an `AttributeError` far from its cause. Both are normalised into one `LlmUnavailable`
+exception after retrying each model in `LLM_FALLBACK_MODELS` in turn.
+
+The more important decision is what a dead model means. A tool result costs a query and
+is still true, so when the model dies *after* tools have run, `loop.py` composes the reply
+from each `ToolResult.summary` and flags the outcome as degraded — the charts, tables and
+provenance render exactly as they would have. Only a turn that gathered nothing reports
+the outage, and it does so as a service message rather than as "I cannot answer that",
+because the data was never the problem.
+
+## Comparisons are one chart
+
+Two charts side by side force the reader to reconcile two axes before they can compare
+two numbers, so a comparison is drawn as one chart with a series per scope wherever it
+can be. `analytics/series.py` owns that pivot.
+
+It has two callers because a comparison arrives two ways. The model may pass `compare` to
+one tool, which is preferred and costs one round trip; or it may call the same tool once
+per scope, in which case `runtime._blocks()` groups results by `(metric, x, kind)` and
+merges them. One implementation serves both, since the frontend only knows how to draw
+one shape.
+
+The pivot refuses more than it accepts, because a merged chart hides its own mistakes: it
+declines when the metrics differ, when two series would carry the same name, or when the
+series share no x value at all — two region leaderboards have no centers in common, and
+one chart of two disjoint halves is worse than two charts. X values are ordered by
+distance from the newest, so a 3-day and a 6-day window ending on the same day interleave
+chronologically instead of the shorter one being appended after the longer one.
+
 ## Storage split
 
 | Store | File | Holds | Lifetime |
@@ -89,6 +150,7 @@ app/
 │   └── admin.py           GET /health, GET /meta, GET /refresh/history, POST /refresh
 │
 ├── agent/               THE AI ENGINE
+│   ├── llm.py             the only model call: retries, model fallback, LlmUnavailable
 │   ├── router.py          skill selection: LLM choice, deterministic keyword fallback
 │   ├── loop.py            capped tool-calling loop, scoped to the chosen skill's tools
 │   ├── runtime.py         orchestration; ToolResult → table/chart blocks + provenance
@@ -109,7 +171,9 @@ app/
 │
 ├── analytics/           SEALED BUSINESS LOGIC (pure functions over DuckDB)
 │   ├── result.py          ToolResult, Provenance, ChartSpec
-│   ├── filters.py         the shared SQL predicates and every threshold literal
+│   ├── filters.py         thresholds; scope resolution (center/city/region/exclude)
+│   │                      and class filters, as SQL predicates
+│   ├── series.py          pivots single-series results into one multi-series chart
 │   ├── query.py           count/avg/sum/select helpers, provenance, target lookup
 │   ├── admissions.py  finance.py  revenue.py  retention.py  cancellations.py
 │   ├── rollups.py         region/center roll-ups, target scoreboard
@@ -121,8 +185,8 @@ app/
 │   ├── tabular.py         typed staging load and atomic swap
 │   ├── ingestion.py       refresh() and audited run_refresh()
 │   ├── availability.py    what is loaded, how fresh, what is missing
-│   ├── reference_date.py  data-anchored "today" (MAX(joining_date))
-│   ├── registry.py        center/region resolver with clarification
+│   ├── reference_date.py  data-anchored "today" (MAX(joining_date)) and month offsets
+│   ├── registry.py        center/city/region resolver with clarification
 │   └── conversation.py    chat history
 │
 ├── core/                FOUNDATIONS
@@ -224,6 +288,11 @@ names at import, and both routers start considering the skill immediately.
 - Missing data produces an explicit decline, never a synthesised figure.
 - Every answer carries the reference date, and a staleness warning when the refresh is
   overdue.
+- A scope that aggregates says how many centers it covered, in the label, the chart title
+  and the provenance.
+- A model outage never discards a tool result that already came back.
+- A comparison renders as one chart, or as separate charts — never as a merge the pivot
+  could not justify.
 
 ## Tests
 
@@ -245,4 +314,7 @@ unreachable.
 | `test_explorer.py` | writes, escapes, multi-statement and PII attempts all refused |
 | `test_parity.py` | analytics invariants, plus a golden-value harness for the workbook |
 | `test_render.py` | table/chart block shapes, dedupe, refresh catch-up logic |
+| `test_scope.py` | city grouping, exclusion arithmetic, month offsets, class filters |
+| `test_compare.py` | `compare` and auto-merge produce one chart; what the pivot refuses |
+| `test_llm.py` | retry, model fallback, and that tool results survive a dead model |
 | `test_logs.py` | logging config is idempotent, correlation ids reach the output |
