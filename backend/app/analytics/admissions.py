@@ -8,11 +8,14 @@ query stays correct if that ever stops being true.
 from __future__ import annotations
 
 import datetime as dt
+from typing import Callable
 
-from ..data.reference_date import (dod_dates, month_bounds, month_starts, next_month,
+from . import series
+from ..data.reference_date import (dod_dates, month_offset, month_starts, next_month,
                                    reference_date)
 from ..data.schema import CLASSWISE_TOKENS, TABLE_RD26
-from .filters import ACTIVE, CONFIRMED_INCL, CONFIRMED_STRICT, NOT_FREE, Scope, resolve_scope
+from .filters import (ACTIVE, CONFIRMED_INCL, CONFIRMED_STRICT, NOT_FREE, ClassFilter,
+                      Scope, resolve_classes, resolve_scope)
 from .query import (count_rows, fmt_int, fmt_pct, pct, provenance, require, select_rows,
                     target_lookup)
 from .result import ChartSpec, ToolResult
@@ -33,64 +36,141 @@ def confirmed_count(scope: Scope, before: dt.date | None = None) -> int:
     return count_rows(TABLE_RD26, clauses, params)
 
 
-def _scoped(metric: str, center: str | None, region: str | None) -> tuple[Scope, ToolResult | None]:
+# More than a handful of series makes a chart unreadable, and each one is a full query.
+COMPARE_MAX = 5
+
+
+def compare_series(metric: str, terms: list[str],
+                   build: Callable[[str], ToolResult]) -> ToolResult:
+    """Run one series query per scope and pivot the results into a single chart.
+
+    `build` is the same single-scope function the caller would otherwise have run, so a
+    compared series and a standalone one are computed by identical code and cannot
+    disagree.
+
+    A term that will not resolve declines the whole call with that term's own reason.
+    Dropping it instead would answer a two-scope question with one scope and no warning,
+    which reads as a complete answer.
+    """
+    wanted = list(dict.fromkeys(t.strip() for t in terms if t and t.strip()))
+    if len(wanted) < 2:
+        return ToolResult.needs_clarification(
+            metric, "A comparison needs at least two different centers, cities or "
+                    "regions. Name the ones to compare.")
+    if len(wanted) > COMPARE_MAX:
+        return ToolResult.unavailable(
+            metric, f"comparing more than {COMPARE_MAX} scopes at once produces an "
+                    f"unreadable chart; ask for the top few, or for a ranked table")
+
+    results: list[ToolResult] = []
+    for term in wanted:
+        result = build(term)
+        if not result.ok:
+            return result
+        results.append(result)
+
+    merged = series.merge(results)
+    if merged is None:
+        return ToolResult.unavailable(
+            metric, f"the {metric} series for {', '.join(wanted)} could not be lined up "
+                    f"on a shared axis")
+    return merged
+
+
+def _scoped(metric: str, center: str | None, region: str | None,
+            exclude: str | None = None,
+            classes: list[str] | None = None) -> tuple[Scope, ClassFilter, ToolResult | None]:
+    """Resolve the scope and class filter together, or return the decline that blocks."""
     blocked = require(metric, TABLE_RD26)
     if blocked:
-        return Scope(), blocked
-    scope = resolve_scope(center, region)
+        return Scope(), ClassFilter(), blocked
+    scope = resolve_scope(center, region, exclude)
     if not scope.ok:
-        return scope, ToolResult.needs_clarification(
+        return scope, ClassFilter(), ToolResult.needs_clarification(
             metric, scope.clarification or "", scope.candidates)
-    return scope, None
+    selected = resolve_classes(classes)
+    if not selected.ok:
+        return scope, selected, ToolResult.needs_clarification(
+            metric, selected.clarification or "",
+            [label for label, _ in CLASSWISE_TOKENS])
+    return scope, selected, None
+
+
+def _class_note(selected: ClassFilter) -> list[str]:
+    """Provenance note naming the classes counted, when they were narrowed."""
+    return [f"classes {selected.label}"] if selected.requested else []
+
+
+def _scope_label(scope: Scope, selected: ClassFilter) -> str:
+    """Scope description including any class narrowing, for summaries and chart titles."""
+    if selected.requested:
+        return f"{scope.describe()} ({selected.label})"
+    return scope.describe()
 
 
 def fresh_registrations(center: str | None = None, region: str | None = None,
-                        before: dt.date | None = None) -> ToolResult:
+                        before: dt.date | None = None, exclude: str | None = None,
+                        classes: list[str] | None = None) -> ToolResult:
     """Total confirmed fresh registrations. Daily_tracker C128 / D3, Finance C2."""
     metric = "fresh_registrations"
-    scope, blocked = _scoped(metric, center, region)
+    scope, selected, blocked = _scoped(metric, center, region, exclude, classes)
     if blocked:
         return blocked
 
-    value = confirmed_count(scope, before=before)
-    target = target_lookup("reg_target", scope)
-    achieved = pct(value, target)  # E3 = IFERROR(D3/C3,"")
-
-    clauses = [*scope.clauses, *_BASE]
+    clauses = [*scope.clauses, *selected.clauses, *_BASE]
+    params = [*scope.params, *selected.params]
     if before is not None:
         clauses.append("joining_date < ?")
+        params.append(before)
+    value = count_rows(TABLE_RD26, clauses, params)
 
-    summary = f"{fmt_int(value)} confirmed registrations for {scope.describe()}"
+    # A target covers every class, so it cannot be compared with a filtered count.
+    target = None if selected.requested else target_lookup("reg_target", scope)
+    achieved = pct(value, target)  # E3 = IFERROR(D3/C3,"")
+
+    label = _scope_label(scope, selected)
+    summary = f"{fmt_int(value)} confirmed registrations for {label}"
     if target:
         summary += f" against a target of {fmt_int(target)} ({fmt_pct(achieved)} achieved)"
     return ToolResult(
         metric=metric,
         summary=summary + ".",
         values={"value": value, "target": target, "achieved_pct": achieved,
-                "scope": scope.describe()},
-        provenance=provenance(metric, [TABLE_RD26], clauses, scope, row_count=value),
+                "scope": label},
+        provenance=provenance(metric, [TABLE_RD26], clauses, scope, row_count=value,
+                              notes=_class_note(selected)),
     )
 
 
-def monthly_admissions(center: str | None = None, region: str | None = None) -> ToolResult:
-    """Admissions in the reference month. Daily_tracker J3, with L3 as the gap."""
+def monthly_admissions(center: str | None = None, region: str | None = None,
+                       months_back: int = 0, exclude: str | None = None,
+                       classes: list[str] | None = None) -> ToolResult:
+    """Admissions in one month. Daily_tracker J3, with L3 as the gap.
+
+    months_back=0 is the reference month, 1 is the month before it.
+    """
     metric = "monthly_admissions"
-    scope, blocked = _scoped(metric, center, region)
+    scope, selected, blocked = _scoped(metric, center, region, exclude, classes)
     if blocked:
         return blocked
 
     ref = reference_date()
-    start, end = month_bounds(ref)
-    clauses = [*scope.clauses, *_BASE, "joining_date >= ?", "joining_date < ?"]
-    params = [*scope.params, start, end]
+    start, end = month_offset(ref, months_back)
+    clauses = [*scope.clauses, *selected.clauses, *_BASE,
+               "joining_date >= ?", "joining_date < ?"]
+    params = [*scope.params, *selected.params, start, end]
     value = count_rows(TABLE_RD26, clauses, params)
 
-    target = target_lookup("monthly_target", scope)
+    # The monthly target is set for the current month across all classes; neither a
+    # past month nor a class subset can be measured against it.
+    comparable = months_back == 0 and not selected.requested
+    target = target_lookup("monthly_target", scope) if comparable else None
     achieved = pct(value, target)              # K3
     pending = (target - value) if target is not None else None   # L3 = I3 - J3
 
-    summary = (f"{fmt_int(value)} admissions in {start.strftime('%B %Y')} "
-               f"for {scope.describe()}")
+    label = _scope_label(scope, selected)
+    month_name = start.strftime("%B %Y")
+    summary = f"{fmt_int(value)} admissions in {month_name} for {label}"
     if target:
         summary += (f" against a monthly target of {fmt_int(target)} "
                     f"({fmt_pct(achieved)} achieved, {fmt_int(pending)} still needed)")
@@ -98,18 +178,25 @@ def monthly_admissions(center: str | None = None, region: str | None = None) -> 
         metric=metric,
         summary=summary + ".",
         values={"value": value, "target": target, "achieved_pct": achieved,
-                "pending": pending, "month": start.strftime("%B %Y"),
-                "scope": scope.describe()},
+                "pending": pending, "month": month_name, "scope": label},
         provenance=provenance(metric, [TABLE_RD26], clauses, scope, row_count=value,
-                              ref=ref, notes=[f"month window {start} to {end}"]),
+                              ref=ref,
+                              notes=[f"month window {start} to {end}",
+                                     *_class_note(selected)]),
     )
 
 
 def dod_admissions(center: str | None = None, region: str | None = None,
-                   days: int = 20) -> ToolResult:
+                   days: int = 20, exclude: str | None = None,
+                   classes: list[str] | None = None,
+                   compare: list[str] | None = None) -> ToolResult:
     """Day-on-day admissions, newest first. Daily_tracker M3..AG3."""
     metric = "dod_admissions"
-    scope, blocked = _scoped(metric, center, region)
+    if compare:
+        return compare_series(metric, compare, lambda term: dod_admissions(
+            center=term, days=days, classes=classes))
+
+    scope, selected, blocked = _scoped(metric, center, region, exclude, classes)
     if blocked:
         return blocked
 
@@ -117,8 +204,9 @@ def dod_admissions(center: str | None = None, region: str | None = None,
     calendar = dod_dates(ref, days=max(1, min(days, 90)))
     oldest, newest = calendar[-1], calendar[0]
 
-    clauses = [*scope.clauses, *_BASE, "joining_date >= ?", "joining_date <= ?"]
-    params = [*scope.params, oldest, newest]
+    clauses = [*scope.clauses, *selected.clauses, *_BASE,
+               "joining_date >= ?", "joining_date <= ?"]
+    params = [*scope.params, *selected.params, oldest, newest]
     counts = {
         r[0]: int(r[1])
         for r in select_rows(TABLE_RD26, "joining_date, COUNT(*)", clauses, params,
@@ -127,28 +215,36 @@ def dod_admissions(center: str | None = None, region: str | None = None,
 
     rows = [[d.isoformat(), counts.get(d, 0)] for d in calendar]
     total = sum(r[1] for r in rows)
+    label = _scope_label(scope, selected)
     return ToolResult(
         metric=metric,
         summary=(f"{fmt_int(total)} admissions over the last {len(calendar)} days "
-                 f"for {scope.describe()}, latest day {newest.isoformat()} "
+                 f"for {label}, latest day {newest.isoformat()} "
                  f"with {counts.get(newest, 0)}."),
         values={"value": total, "days": len(calendar), "latest_date": newest.isoformat(),
-                "latest_count": counts.get(newest, 0), "scope": scope.describe()},
+                "latest_count": counts.get(newest, 0), "scope": label},
         columns=["Date", "Admissions"],
         # Oldest-first so the line reads left to right.
         rows=list(reversed(rows)),
         chart=ChartSpec(kind="line", x="Date", y=["Admissions"],
-                        title=f"Daily admissions — {scope.describe()}"),
+                        title=f"Daily admissions — {label}"),
         provenance=provenance(metric, [TABLE_RD26], clauses, scope, row_count=total,
-                              ref=ref, notes=[f"{oldest} to {newest}"]),
+                              ref=ref,
+                              notes=[f"{oldest} to {newest}", *_class_note(selected)]),
     )
 
 
 def monthly_trend(center: str | None = None, region: str | None = None,
-                  months: int = 12) -> ToolResult:
+                  months: int = 12, exclude: str | None = None,
+                  classes: list[str] | None = None,
+                  compare: list[str] | None = None) -> ToolResult:
     """Month-by-month admissions. Daily_tracker D61 series."""
     metric = "monthly_trend"
-    scope, blocked = _scoped(metric, center, region)
+    if compare:
+        return compare_series(metric, compare, lambda term: monthly_trend(
+            center=term, months=months, classes=classes))
+
+    scope, selected, blocked = _scoped(metric, center, region, exclude, classes)
     if blocked:
         return blocked
 
@@ -156,8 +252,9 @@ def monthly_trend(center: str | None = None, region: str | None = None,
     starts = month_starts(ref, months=max(1, min(months, 36)))
     window_start, window_end = starts[0], next_month(starts[-1])
 
-    clauses = [*scope.clauses, *_BASE, "joining_date >= ?", "joining_date < ?"]
-    params = [*scope.params, window_start, window_end]
+    clauses = [*scope.clauses, *selected.clauses, *_BASE,
+               "joining_date >= ?", "joining_date < ?"]
+    params = [*scope.params, *selected.params, window_start, window_end]
     counts = {
         (r[0].date() if isinstance(r[0], dt.datetime) else r[0]): int(r[1])
         for r in select_rows(TABLE_RD26, "date_trunc('month', joining_date), COUNT(*)",
@@ -166,46 +263,41 @@ def monthly_trend(center: str | None = None, region: str | None = None,
 
     rows = [[s.strftime("%b %Y"), counts.get(s, 0)] for s in starts]
     total = sum(r[1] for r in rows)
+    label = _scope_label(scope, selected)
     return ToolResult(
         metric=metric,
         summary=(f"{fmt_int(total)} admissions across {len(starts)} months for "
-                 f"{scope.describe()}, ending {starts[-1].strftime('%B %Y')}."),
-        values={"value": total, "months": len(starts), "scope": scope.describe()},
+                 f"{label}, ending {starts[-1].strftime('%B %Y')}."),
+        values={"value": total, "months": len(starts), "scope": label},
         columns=["Month", "Admissions"],
         rows=rows,
         chart=ChartSpec(kind="line", x="Month", y=["Admissions"],
-                        title=f"Monthly admissions — {scope.describe()}"),
+                        title=f"Monthly admissions — {label}"),
         provenance=provenance(metric, [TABLE_RD26], clauses, scope, row_count=total,
-                              ref=ref),
+                              ref=ref, notes=_class_note(selected)),
     )
 
 
 def classwise_breakdown(center: str | None = None, region: str | None = None,
-                        classes: list[str] | None = None) -> ToolResult:
+                        classes: list[str] | None = None,
+                        exclude: str | None = None,
+                        compare: list[str] | None = None) -> ToolResult:
     """Registrations per class/stream. Daily_tracker D128..L128.
 
     Uses the inclusive threshold (>= 3498), unlike the registration total, and covers
     only the workbook's nine class columns — so it does not sum to that total.
     """
     metric = "classwise_breakdown"
-    scope, blocked = _scoped(metric, center, region)
+    if compare:
+        return compare_series(metric, compare, lambda term: classwise_breakdown(
+            center=term, classes=classes))
+
+    scope, selected, blocked = _scoped(metric, center, region, exclude, classes)
     if blocked:
         return blocked
 
-    # Filter to requested classes, or use all nine.
-    if classes:
-        # Normalise user input to match the canonical labels.
-        requested = {c.strip().lower() for c in classes}
-        tokens = [t for t in CLASSWISE_TOKENS if t[0].lower() in requested]
-        if not tokens:
-            return ToolResult.needs_clarification(
-                metric,
-                f"None of {classes} matched a tracked class. "
-                f"Valid classes: {', '.join(label for label, _ in CLASSWISE_TOKENS)}.",
-                [label for label, _ in CLASSWISE_TOKENS])
-    else:
-        tokens = list(CLASSWISE_TOKENS)
-
+    # A column per class, so the selection drives the SELECT rather than the WHERE.
+    tokens = selected.tokens
     clauses = [*scope.clauses, CONFIRMED_INCL, NOT_FREE, ACTIVE]
     params = [*scope.params]
     # One pass with a CASE per class beats nine separate COUNTIFS round trips.
@@ -219,7 +311,8 @@ def classwise_breakdown(center: str | None = None, region: str | None = None,
     total = sum(counts)
     top = max(rows, key=lambda r: r[1]) if rows else ["n/a", 0]
 
-    class_note = f"{len(tokens)} selected classes" if classes else "nine tracked classes only"
+    class_note = (f"{len(tokens)} selected classes" if selected.requested
+                  else "nine tracked classes only")
     return ToolResult(
         metric=metric,
         summary=(f"{fmt_int(total)} registrations across {class_note} for "
@@ -235,9 +328,10 @@ def classwise_breakdown(center: str | None = None, region: str | None = None,
     )
 
 
-def pending_admissions(center: str | None = None, region: str | None = None) -> ToolResult:
+def pending_admissions(center: str | None = None, region: str | None = None,
+                       exclude: str | None = None) -> ToolResult:
     """Gap to the monthly target. Daily_tracker L3."""
-    monthly = monthly_admissions(center=center, region=region)
+    monthly = monthly_admissions(center=center, region=region, exclude=exclude)
     if not monthly.ok:
         return monthly
     target = monthly.values.get("target")
@@ -258,14 +352,15 @@ def pending_admissions(center: str | None = None, region: str | None = None) -> 
     )
 
 
-def admissions_summary(center: str | None = None, region: str | None = None) -> ToolResult:
+def admissions_summary(center: str | None = None, region: str | None = None,
+                       exclude: str | None = None) -> ToolResult:
     """Registration, monthly and class-mix headlines in one call."""
     metric = "admissions_summary"
-    total = fresh_registrations(center=center, region=region)
+    total = fresh_registrations(center=center, region=region, exclude=exclude)
     if not total.ok:
         return total
-    monthly = monthly_admissions(center=center, region=region)
-    classwise = classwise_breakdown(center=center, region=region)
+    monthly = monthly_admissions(center=center, region=region, exclude=exclude)
+    classwise = classwise_breakdown(center=center, region=region, exclude=exclude)
 
     scope_label = total.values.get("scope")
     rows = [

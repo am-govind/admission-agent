@@ -16,6 +16,8 @@ from typing import Any, Callable, Sequence, Type
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ...analytics.result import ToolResult
+# Imported so the advertised class names cannot drift from the ones analytics accepts.
+from ...data.schema import CLASSWISE_TOKENS
 
 log = logging.getLogger(__name__)
 
@@ -141,19 +143,50 @@ class ScopeParams(Params):
                           "the whole organisation.")
 
 
-class ScopeDaysParams(ScopeParams):
+# The admissions family accepts exclusion and class filters on top of the shared scope.
+# They are declared here rather than on ScopeParams because the finance and retention
+# tools share that base and their analytics functions take neither argument — a widened
+# base would hand them a keyword they cannot accept.
+
+_CLASS_LABELS = ", ".join(label for label, _ in CLASSWISE_TOKENS)
+
+
+class AdmissionsScopeParams(ScopeParams):
+    exclude: str | None = Field(
+        None, description="Subtract a center, city or region from the scope. Use for "
+                          "'rest of' and 'excluding' questions: region='Maharashtra' with "
+                          "exclude='Mumbai' means the Maharashtra centers outside Mumbai.")
+
+
+class AdmissionsFilterParams(AdmissionsScopeParams):
+    classes: list[str] | None = Field(
+        None, description=f"Filter to specific classes, e.g. ['Dropper JEE', "
+                          f"'Dropper NEET']. Valid values: {_CLASS_LABELS}. "
+                          f"Omit to count every class.")
+
+
+class AdmissionsCompareParams(AdmissionsFilterParams):
+    compare: list[str] | None = Field(
+        None, description="Two to five centers, cities or regions to chart together, "
+                          "e.g. ['Maharashtra', 'South'] or ['Pune', 'Nagpur']. One call "
+                          "with compare produces a single chart with one line per scope, "
+                          "which is far more readable than calling this tool once per "
+                          "scope. Overrides center and region when set.")
+
+
+class AdmissionsDailyParams(AdmissionsCompareParams):
     days: int = Field(20, ge=1, le=90, description="How many days back to report.")
 
 
-class ScopeClassesParams(ScopeParams):
-    classes: list[str] | None = Field(
-        None, description="Filter to specific classes, e.g. ['Dropper JEE', 'Dropper NEET']. "
-                          "Valid values: 8th, 9th, 10th, 11th JEE, 11th NEET, 12th JEE, "
-                          "12th NEET, Dropper JEE, Dropper NEET. Omit for all nine.")
-
-
-class ScopeMonthsParams(ScopeParams):
+class AdmissionsTrendParams(AdmissionsCompareParams):
     months: int = Field(12, ge=1, le=36, description="How many months back to report.")
+
+
+class AdmissionsMonthlyParams(AdmissionsFilterParams):
+    months_back: int = Field(
+        0, ge=0, le=36,
+        description="0 for the current month, 1 for last month, 2 for the month before "
+                    "that, and so on. Counted from the data's reference date.")
 
 
 class RegionParams(Params):

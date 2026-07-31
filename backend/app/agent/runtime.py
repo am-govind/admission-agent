@@ -12,6 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+from ..analytics import series
 from ..analytics.result import ToolResult, jsonable
 from ..data import availability
 from ..models import ContentBlock
@@ -51,8 +52,8 @@ def _chart_block(result: ToolResult) -> ContentBlock | None:
     columns = list(result.columns)
     if spec.x not in columns:
         return None
-    series = [c for c in spec.y if c in columns and c != spec.x]
-    if not series or len(result.rows) < 2:
+    plotted = [c for c in spec.y if c in columns and c != spec.x]
+    if not plotted or len(result.rows) < 2:
         return None
 
     index = {name: i for i, name in enumerate(columns)}
@@ -60,44 +61,79 @@ def _chart_block(result: ToolResult) -> ContentBlock | None:
     for row in result.rows:
         # Subtotal and grand-total rows would dwarf every real bar.
         label = str(row[index[spec.x]])
-        if label.lower() in {"grand total", "subtotal", "total"}:
+        if label.lower() in series.TOTAL_LABELS:
             continue
         rows.append({spec.x: jsonable(row[index[spec.x]]),
-                     **{c: jsonable(row[index[c]]) for c in series}})
+                     **{c: jsonable(row[index[c]]) for c in plotted}})
     if len(rows) < 2:
         return None
 
     return ContentBlock(
         id=f"chart-{uuid.uuid4().hex[:8]}",
         type="chart",
-        data={"kind": spec.to_dict()["kind"], "x": spec.x, "y": series,
+        data={"kind": spec.to_dict()["kind"], "x": spec.x, "y": plotted,
               "title": spec.title, "rows": rows},
     )
 
 
-def _blocks(results: list[ToolResult]) -> tuple[list[ContentBlock], list[str]]:
-    blocks: list[ContentBlock] = []
-    provenance: list[str] = []
-    seen: set[str] = set()
+def _single_series(result: ToolResult) -> bool:
+    """One x column and one value column — the shape that can join a comparison."""
+    return result.chart is not None and len(result.columns) == 2
 
+
+def _group_key(result: ToolResult, position: int) -> tuple:
+    """Results that measure the same thing on the same axis share a key.
+
+    Anything not single-series shaped gets a key unique to its position, so it passes
+    through on its own and can never be folded into someone else's chart.
+    """
+    if not _single_series(result) or result.chart is None:
+        return ("solo", position)
+    return (result.metric, result.chart.x, result.chart.kind)
+
+
+def _blocks(results: list[ToolResult]) -> tuple[list[ContentBlock], list[str]]:
+    """Content blocks plus provenance lines, merging comparable series into one chart.
+
+    A model asked for "Maharashtra vs South" may call one tool twice rather than using
+    the compare parameter. Two charts answer that question worse than one, so results
+    measuring the same metric on the same axis are pivoted together here as well. Each
+    series keeps its own provenance line, so merging never hides where a number came
+    from.
+    """
+    provenance: list[str] = []
     for result in results:
         if result.provenance is not None:
             description = result.provenance.describe()
             if description not in provenance:
                 provenance.append(description)
+
+    # The same tool called twice in a turn must not render the same table twice.
+    unique: list[ToolResult] = []
+    seen: set[str] = set()
+    for result in results:
         if not result.has_table:
             continue
-        # The same tool called twice in a turn must not render the same table twice.
         fingerprint = json.dumps(
             [result.metric, result.columns, result.table_payload()["rows"]],
             ensure_ascii=False, default=str)
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
-        chart = _chart_block(result)
-        if chart is not None:
-            blocks.append(chart)
-        blocks.append(_table_block(result))
+        unique.append(result)
+
+    groups: dict[tuple, list[ToolResult]] = {}
+    for position, result in enumerate(unique):
+        groups.setdefault(_group_key(result, position), []).append(result)
+
+    blocks: list[ContentBlock] = []
+    for group in groups.values():
+        merged = series.merge(group) if len(group) > 1 else None
+        for item in ([merged] if merged is not None else group):
+            chart = _chart_block(item)
+            if chart is not None:
+                blocks.append(chart)
+            blocks.append(_table_block(item))
     return blocks, provenance
 
 
