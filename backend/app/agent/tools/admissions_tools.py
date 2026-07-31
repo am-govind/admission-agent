@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from ...analytics import admissions
 from ...analytics.result import ToolResult
-from .registry import ScopeDaysParams, ScopeMonthsParams, ScopeParams, tool
+from .registry import ScopeClassesParams, ScopeDaysParams, ScopeMonthsParams, ScopeParams, tool
 
 
 @tool("get_fresh_registrations",
@@ -45,11 +45,13 @@ def get_monthly_trend(center: str | None = None, region: str | None = None,
 
 @tool("get_classwise_breakdown",
       "Registrations split across the nine tracked classes (8th, 9th, 10th, 11th JEE, "
-      "11th NEET, 12th JEE, 12th NEET, Dropper JEE, Dropper NEET).",
-      ScopeParams)
+      "11th NEET, 12th JEE, 12th NEET, Dropper JEE, Dropper NEET). Supports filtering "
+      "to specific classes via the 'classes' parameter.",
+      ScopeClassesParams)
 def get_classwise_breakdown(center: str | None = None,
-                            region: str | None = None) -> ToolResult:
-    return admissions.classwise_breakdown(center=center, region=region)
+                            region: str | None = None,
+                            classes: list[str] | None = None) -> ToolResult:
+    return admissions.classwise_breakdown(center=center, region=region, classes=classes)
 
 
 @tool("get_pending_admissions",

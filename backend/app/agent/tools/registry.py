@@ -145,6 +145,13 @@ class ScopeDaysParams(ScopeParams):
     days: int = Field(20, ge=1, le=90, description="How many days back to report.")
 
 
+class ScopeClassesParams(ScopeParams):
+    classes: list[str] | None = Field(
+        None, description="Filter to specific classes, e.g. ['Dropper JEE', 'Dropper NEET']. "
+                          "Valid values: 8th, 9th, 10th, 11th JEE, 11th NEET, 12th JEE, "
+                          "12th NEET, Dropper JEE, Dropper NEET. Omit for all nine.")
+
+
 class ScopeMonthsParams(ScopeParams):
     months: int = Field(12, ge=1, le=36, description="How many months back to report.")
 

@@ -180,7 +180,8 @@ def monthly_trend(center: str | None = None, region: str | None = None,
     )
 
 
-def classwise_breakdown(center: str | None = None, region: str | None = None) -> ToolResult:
+def classwise_breakdown(center: str | None = None, region: str | None = None,
+                        classes: list[str] | None = None) -> ToolResult:
     """Registrations per class/stream. Daily_tracker D128..L128.
 
     Uses the inclusive threshold (>= 3498), unlike the registration total, and covers
@@ -191,22 +192,37 @@ def classwise_breakdown(center: str | None = None, region: str | None = None) ->
     if blocked:
         return blocked
 
+    # Filter to requested classes, or use all nine.
+    if classes:
+        # Normalise user input to match the canonical labels.
+        requested = {c.strip().lower() for c in classes}
+        tokens = [t for t in CLASSWISE_TOKENS if t[0].lower() in requested]
+        if not tokens:
+            return ToolResult.needs_clarification(
+                metric,
+                f"None of {classes} matched a tracked class. "
+                f"Valid classes: {', '.join(label for label, _ in CLASSWISE_TOKENS)}.",
+                [label for label, _ in CLASSWISE_TOKENS])
+    else:
+        tokens = list(CLASSWISE_TOKENS)
+
     clauses = [*scope.clauses, CONFIRMED_INCL, NOT_FREE, ACTIVE]
     params = [*scope.params]
     # One pass with a CASE per class beats nine separate COUNTIFS round trips.
     select = ", ".join(
-        f"SUM(CASE WHEN class_course ILIKE ? THEN 1 ELSE 0 END)" for _ in CLASSWISE_TOKENS)
-    pattern_params = [f"%{token}%" for _, token in CLASSWISE_TOKENS]
+        f"SUM(CASE WHEN class_course ILIKE ? THEN 1 ELSE 0 END)" for _ in tokens)
+    pattern_params = [f"%{token}%" for _, token in tokens]
     result = select_rows(TABLE_RD26, select, clauses, [*pattern_params, *params])
 
-    counts = [int(v or 0) for v in (result[0] if result else [0] * len(CLASSWISE_TOKENS))]
-    rows = [[label, count] for (label, _), count in zip(CLASSWISE_TOKENS, counts)]
+    counts = [int(v or 0) for v in (result[0] if result else [0] * len(tokens))]
+    rows = [[label, count] for (label, _), count in zip(tokens, counts)]
     total = sum(counts)
     top = max(rows, key=lambda r: r[1]) if rows else ["n/a", 0]
 
+    class_note = f"{len(tokens)} selected classes" if classes else "nine tracked classes only"
     return ToolResult(
         metric=metric,
-        summary=(f"{fmt_int(total)} registrations across the nine tracked classes for "
+        summary=(f"{fmt_int(total)} registrations across {class_note} for "
                  f"{scope.describe()}; largest is {top[0]} with {fmt_int(top[1])}."),
         values={"value": total, "largest_class": top[0], "largest_count": top[1],
                 "scope": scope.describe()},
@@ -215,7 +231,7 @@ def classwise_breakdown(center: str | None = None, region: str | None = None) ->
         chart=ChartSpec(kind="bar", x="Class", y=["Registrations"],
                         title=f"Class-wise registrations — {scope.describe()}"),
         provenance=provenance(metric, [TABLE_RD26], clauses, scope, row_count=total,
-                              notes=["nine tracked classes only"]),
+                              notes=[class_note]),
     )
 
 
