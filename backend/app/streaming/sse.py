@@ -7,6 +7,7 @@ import traceback
 import uuid
 from typing import AsyncIterator
 
+from ..agent.llm import LlmUnavailable
 from ..agent.memory import history_for_prompt
 from ..agent.runtime import run_turn
 from ..core.logs import bind_conversation
@@ -58,6 +59,17 @@ async def stream_turn(message: str, conversation_id: str) -> AsyncIterator[str]:
 
     try:
         output = task.result()
+    except LlmUnavailable as e:
+        # Reached only when no tool result survived either; the loop answers from
+        # partial results whenever it can. The chain detail belongs in the log, not
+        # in the user's chat window.
+        logging.getLogger(__name__).error("Model unavailable for the whole turn: %s", e)
+        yield events.thinking_end()
+        yield events.run_error(
+            thread_id, run_id, "MODEL_UNAVAILABLE",
+            "The language model is not responding right now. Please try again in a "
+            "moment — your data is loaded and unaffected.")
+        return
     except Exception as e:  # noqa: BLE001 - the client needs one clean error frame
         logging.getLogger(__name__).error("Turn crashed:\n%s", traceback.format_exc())
         yield events.thinking_end()

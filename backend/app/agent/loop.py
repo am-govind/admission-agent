@@ -8,6 +8,11 @@ ToolResult in this loop.
 The iteration cap is a hard stop. When it is reached the loop makes one final call with
 no tools available, which forces an answer from what has already been gathered instead
 of looping until the request times out.
+
+A model outage mid-turn does not discard work. Tool results are real numbers that cost a
+query each, so if the model becomes unreachable after some have come back, the loop words
+the reply from their own summaries and flags the outcome as degraded. Only a turn that
+gathered nothing at all surfaces the outage to the caller.
 """
 from __future__ import annotations
 
@@ -19,7 +24,7 @@ from typing import Any, Callable
 
 from ..analytics.result import ToolResult
 from ..core.config import settings
-from . import memory, prompts
+from . import llm, memory, prompts
 from .skills import Skill
 from .tools import REGISTRY, get_tool, schemas_for
 
@@ -35,6 +40,8 @@ class LoopOutcome:
     notes: list[str] = field(default_factory=list)
     iterations: int = 0
     tool_calls: list[str] = field(default_factory=list)
+    # The text was assembled from tool summaries because the model was unreachable.
+    degraded: bool = False
 
     @property
     def rendered_results(self) -> list[ToolResult]:
@@ -52,12 +59,9 @@ async def run_loop(message: str, skill: Skill, history: list[dict] | None = None
                    conversation_id: str | None = None,
                    progress: Progress | None = None) -> LoopOutcome:
     """Run one turn to completion and return the model's text plus every tool result."""
-    if not settings.llm_api_key:
+    if not llm.configured():
         return LoopOutcome(text=NO_MODEL_MESSAGE)
 
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
     slots = slots or {}
 
     messages: list[dict[str, Any]] = [
@@ -77,20 +81,23 @@ async def run_loop(message: str, skill: Skill, history: list[dict] | None = None
         outcome.iterations = iteration
         started = time.perf_counter()
         try:
-            response = await _complete(client, messages, schemas if schemas else None)
-            # OpenRouter free-tier models sometimes return 500s as a response
-            # object with choices=None instead of raising an exception.
-            if not getattr(response, "choices", None):
-                err = getattr(response, "error", None)
-                detail = err.get("message", str(err)) if isinstance(err, dict) else str(response)
-                raise RuntimeError(f"LLM returned no choices: {detail}")
-        except Exception as e:  # noqa: BLE001 - logged here, handled by the caller
-            log.error("Model call failed on iteration %s (%s): %s", iteration,
-                      settings.llm_model, e)
-            raise
+            choice = await llm.complete(
+                messages, tools=schemas if schemas else None,
+                purpose=f"{skill.skill_id} turn (iteration {iteration})")
+        except llm.LlmUnavailable as e:
+            # Results already gathered are real numbers and must not be thrown away
+            # because the model went down before it could word them.
+            degraded = _degraded_text(outcome)
+            if not degraded:
+                raise
+            log.warning("Model unavailable on iteration %s (%s); answering from the "
+                        "%s tool result(s) already gathered", iteration, e,
+                        len(outcome.rendered_results))
+            outcome.text = degraded
+            outcome.degraded = True
+            return outcome
         log.debug("Model responded in %.0fms (iteration %s)",
                   (time.perf_counter() - started) * 1000, iteration)
-        choice = response.choices[0].message
         calls = getattr(choice, "tool_calls", None) or []
 
         if not calls:
@@ -140,23 +147,30 @@ async def run_loop(message: str, skill: Skill, history: list[dict] | None = None
         "content": ("The tool budget for this turn is spent. Answer now using only the "
                     "tool results above. If they are not enough, say what is missing."),
     })
-    response = await _complete(client, messages, None)
-    if getattr(response, "choices", None):
-        outcome.text = (response.choices[0].message.content or "").strip()
-    else:
-        outcome.text = ("The model service returned an error. Please try again in a moment.")
+    try:
+        choice = await llm.complete(messages, purpose="final answer")
+        outcome.text = (choice.content or "").strip()
+    except llm.LlmUnavailable as e:
+        log.warning("Model unavailable for the final answer (%s)", e)
+        outcome.text = _degraded_text(outcome) or (
+            "The model service is unavailable right now. Please try again in a moment.")
+        outcome.degraded = True
     return outcome
 
 
-async def _complete(client, messages: list[dict], schemas: list[dict] | None):
-    options: dict[str, Any] = {}
-    if settings.llm_temperature is not None:
-        options["temperature"] = settings.llm_temperature
-    if schemas:
-        options["tools"] = schemas
-        options["tool_choice"] = "auto"
-    return await client.chat.completions.create(
-        model=settings.llm_model, messages=messages, **options)
+def _degraded_text(outcome: LoopOutcome) -> str:
+    """Word an answer from the tool results without the model.
+
+    Each ToolResult already carries a written summary produced by the analytics layer,
+    so a usable reply exists even with no model at all. Returns "" when nothing
+    succeeded, which is the one case where the caller should surface the outage.
+    """
+    lines = [r.summary.strip() for r in outcome.rendered_results if r.summary.strip()]
+    if not lines:
+        return ""
+    body = "\n".join(f"- {line}" for line in dict.fromkeys(lines))
+    return ("I could not reach the language model to write this up, so here are the "
+            f"figures it had already retrieved:\n\n{body}")
 
 
 def _invoke(name: str, raw_arguments: str | None, message: str, slots: dict[str, str],

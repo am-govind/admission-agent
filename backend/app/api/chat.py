@@ -6,6 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from ..agent.llm import LlmUnavailable
 from ..agent.memory import history_for_prompt
 from ..agent.runtime import run_turn
 from ..core.logs import bind_conversation
@@ -48,6 +49,11 @@ async def chat(body: ChatRequest, user: str = Depends(current_user)) -> ChatResp
     history = history_for_prompt(cid)
     try:
         output = await run_turn(body.message, cid, history)
+    except LlmUnavailable as e:
+        raise HTTPException(
+            status_code=503,
+            detail="The language model is not responding right now. Please try again in "
+                   "a moment — your data is loaded and unaffected.") from e
     except Exception as e:  # noqa: BLE001 - surface a clean error to the client
         raise HTTPException(
             status_code=503, detail=f"The model service is unavailable: {e}") from e
