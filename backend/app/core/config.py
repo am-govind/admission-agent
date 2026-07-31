@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     llm_temperature: float | None = None
     # Disable for providers that reject or ignore response_format (e.g. Scaleway).
     llm_json_mode: bool = True
+    # Free tiers return 429s and 5xx often enough that one attempt is not a fair test
+    # of whether the model can answer.
+    llm_max_retries: int = 3
+    llm_retry_base_delay: float = 0.8
+    # Tried in order after llm_model exhausts its retries. Comma-separated.
+    llm_fallback_models: str = ""
 
     # Guardrails
     guardrails_enabled: bool = True
@@ -132,6 +138,16 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def llm_model_chain(self) -> list[str]:
+        """The primary model followed by each distinct fallback, in order."""
+        chain = [self.llm_model.strip()]
+        for name in self.llm_fallback_models.split(","):
+            candidate = name.strip()
+            if candidate and candidate not in chain:
+                chain.append(candidate)
+        return [m for m in chain if m]
 
     @property
     def log_file_path(self) -> Path | None:

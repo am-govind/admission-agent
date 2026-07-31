@@ -15,6 +15,7 @@ import logging
 from ..core import appdb
 from ..core.config import settings
 from ..data import conversation
+from . import llm
 
 log = logging.getLogger(__name__)
 
@@ -158,19 +159,16 @@ async def update_summary(conversation_id: str) -> None:
 
     transcript = "\n".join(f"{role}: {content[:400]}" for role, content in older)
     try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[
+        choice = await llm.complete(
+            [
                 {"role": "system", "content":
                     "Summarise this analytics conversation in at most three sentences. "
                     "Keep the centers, regions and metrics discussed and any stated "
                     "preference. Do not restate figures — they may now be out of date."},
                 {"role": "user", "content": transcript},
             ],
-        )
-        summary = (response.choices[0].message.content or "").strip()
+            purpose="conversation summary")
+        summary = (choice.content or "").strip()
     except Exception as e:  # noqa: BLE001 - a missing summary must not fail the turn
         log.warning("Could not update conversation summary: %s", e)
         return

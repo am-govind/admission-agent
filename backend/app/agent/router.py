@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 
 from ..core.config import settings
-from . import prompts
+from . import llm, prompts
 from .skills import FALLBACK_SKILL_ID, Skill, get_skill, list_skills
 
 log = logging.getLogger(__name__)
@@ -123,27 +123,13 @@ async def route(message: str, history: list[dict] | None = None) -> Route:
 
 async def _llm_choice(message: str,
                       history: list[dict] | None) -> tuple[str, str] | None:
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
-    options: dict = {}
-    if settings.llm_json_mode:
-        options["response_format"] = {"type": "json_object"}
-    if settings.llm_temperature is not None:
-        options["temperature"] = settings.llm_temperature
-
     messages: list[dict] = [{"role": "system", "content": prompts.router_prompt()}]
     for turn in (history or [])[-4:]:
         messages.append({"role": turn["role"], "content": turn["content"][:500]})
     messages.append({"role": "user", "content": message})
 
-    response = await client.chat.completions.create(
-        model=settings.llm_model, messages=messages, **options)
-    if not getattr(response, "choices", None):
-        return None
-    text = response.choices[0].message.content or ""
-
-    data = _parse_json(text)
+    choice = await llm.complete(messages, json_mode=True, purpose="routing")
+    data = _parse_json(choice.content or "")
     if not isinstance(data, dict):
         return None
     skill_id = data.get("skill_id") or data.get("skill")
