@@ -44,6 +44,25 @@ def next_month(first: dt.date) -> dt.date:
         else first.replace(month=first.month + 1)
 
 
+def prev_month(first: dt.date) -> dt.date:
+    """EDATE(first, -1) for a date that is already the first of a month."""
+    return first.replace(year=first.year - 1, month=12) if first.month == 1 \
+        else first.replace(month=first.month - 1)
+
+
+def month_offset(ref: dt.date, back: int = 0) -> tuple[dt.date, dt.date]:
+    """The [start, end) bounds of the month `back` months before ref's month.
+
+    back=0 is "this month" and back=1 is "last month", both relative to the reference
+    date rather than the server clock, so the answer matches the delivered dump.
+    """
+    start, end = month_bounds(ref)
+    for _ in range(max(0, back)):
+        end = start
+        start = prev_month(start)
+    return start, end
+
+
 def dod_latest(ref: dt.date) -> dt.date:
     """Most recent complete day for the DOD series.
 
