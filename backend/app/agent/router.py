@@ -139,6 +139,8 @@ async def _llm_choice(message: str,
 
     response = await client.chat.completions.create(
         model=settings.llm_model, messages=messages, **options)
+    if not getattr(response, "choices", None):
+        return None
     text = response.choices[0].message.content or ""
 
     data = _parse_json(text)

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import traceback
 import uuid
 from typing import AsyncIterator
 
@@ -57,6 +59,7 @@ async def stream_turn(message: str, conversation_id: str) -> AsyncIterator[str]:
     try:
         output = task.result()
     except Exception as e:  # noqa: BLE001 - the client needs one clean error frame
+        logging.getLogger(__name__).error("Turn crashed:\n%s", traceback.format_exc())
         yield events.thinking_end()
         yield events.run_error(thread_id, run_id, "AGENT_ERROR", f"Service unavailable: {e}")
         return

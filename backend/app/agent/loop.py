@@ -78,6 +78,12 @@ async def run_loop(message: str, skill: Skill, history: list[dict] | None = None
         started = time.perf_counter()
         try:
             response = await _complete(client, messages, schemas if schemas else None)
+            # OpenRouter free-tier models sometimes return 500s as a response
+            # object with choices=None instead of raising an exception.
+            if not getattr(response, "choices", None):
+                err = getattr(response, "error", None)
+                detail = err.get("message", str(err)) if isinstance(err, dict) else str(response)
+                raise RuntimeError(f"LLM returned no choices: {detail}")
         except Exception as e:  # noqa: BLE001 - logged here, handled by the caller
             log.error("Model call failed on iteration %s (%s): %s", iteration,
                       settings.llm_model, e)
@@ -135,7 +141,10 @@ async def run_loop(message: str, skill: Skill, history: list[dict] | None = None
                     "tool results above. If they are not enough, say what is missing."),
     })
     response = await _complete(client, messages, None)
-    outcome.text = (response.choices[0].message.content or "").strip()
+    if getattr(response, "choices", None):
+        outcome.text = (response.choices[0].message.content or "").strip()
+    else:
+        outcome.text = ("The model service returned an error. Please try again in a moment.")
     return outcome
 
 
