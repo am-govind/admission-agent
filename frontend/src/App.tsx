@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import Chat from './components/Chat';
 import Login from './components/Login';
+import { clearActiveConversation } from './hooks/useConversations';
 
 export default function App() {
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('token'));
@@ -16,6 +17,7 @@ export default function App() {
   function logout() {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    clearActiveConversation();
     setToken(null);
     setUser(null);
   }

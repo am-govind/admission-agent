@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS refresh_runs (
 );
 """
 
+# CREATE TABLE IF NOT EXISTS never adds columns to a database that already exists,
+# so columns introduced after the first release are applied here instead.
+_ADDED_COLUMNS = [
+    ("conversations", "title", "TEXT"),
+    ("conversations", "updated_at", "TEXT"),
+    ("messages", "render_state", "TEXT"),
+]
+
 _local = threading.local()
 _init_lock = threading.Lock()
 _initialised = False
@@ -85,9 +93,17 @@ def get_conn() -> sqlite3.Connection:
         with _init_lock:
             if not _initialised:
                 conn.executescript(_SCHEMA)
+                _add_missing_columns(conn)
                 conn.commit()
                 _initialised = True
     return conn
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def reset() -> None:

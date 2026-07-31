@@ -1,15 +1,38 @@
-import { useRef, useState } from 'react';
-import { streamChat } from '../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { getConversation, isUnauthorized, streamChat } from '../api/client';
+import { useConversations } from '../hooks/useConversations';
 import { emptyRenderState, reduceEvent } from '../state/renderState';
-import type { ChatMessage } from '../types';
-import RenderMessage from './blocks/RenderMessage';
+import type { ChatMessage, TranscriptMessage } from '../types';
+import ChatHeader from './ChatHeader';
+import ChatInput from './ChatInput';
+import MessageList, { type MessageListHandle } from './MessageList';
+import Sidebar from './Sidebar';
 
-const SUGGESTED = [
-  'How many admissions this month for Pune?',
-  'Show the day-on-day trend for Vijayawada Vidyapeeth',
-  'Class-wise breakdown for Bengaluru',
-  'What does ARPU mean?',
-];
+const NEW_CHAT_TITLE = 'New chat';
+
+/** Turn a stored transcript back into the messages the live chat renders. */
+function hydrate(transcript: TranscriptMessage[]): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  let lastPrompt: string | undefined;
+  for (const [i, m] of transcript.entries()) {
+    if (m.role === 'user') {
+      lastPrompt = m.content;
+      messages.push({ id: `h-${i}`, role: 'user', text: m.content });
+    } else {
+      messages.push({
+        id: `h-${i}`,
+        role: 'assistant',
+        prompt: lastPrompt,
+        // Pre-renderState answers have only prose; show it rather than an empty bubble.
+        renderState: m.renderState ?? {
+          parts: [{ type: 'text', id: `h-${i}-text`, content: m.content }],
+          contentBlocks: {},
+        },
+      });
+    }
+  }
+  return messages;
+}
 
 export default function Chat({ token, user, onLogout }: {
   token: string;
@@ -17,36 +40,97 @@ export default function Chat({ token, user, onLogout }: {
   onLogout: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const convId = useRef<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [loadingTranscript, setLoadingTranscript] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 768);
 
-  function scrollToBottom() {
-    requestAnimationFrame(() => {
-      scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-    });
+  const listRef = useRef<MessageListHandle>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  // The id a turn should attach to, kept outside state so a send never races a re-render.
+  const convId = useRef<string | null>(null);
+
+  const {
+    conversations, activeId, setActiveId, loading, refresh, rename, remove,
+  } = useConversations(token, onLogout);
+
+  const openConversation = useCallback(
+    async (id: string) => {
+      convId.current = id;
+      setActiveId(id);
+      setLoadingTranscript(true);
+      try {
+        const detail = await getConversation(token, id);
+        setMessages(hydrate(detail.messages));
+        requestAnimationFrame(() => listRef.current?.scrollToBottom(false));
+      } catch (e) {
+        if (isUnauthorized(e)) onLogout();
+        else setMessages([]);
+      } finally {
+        setLoadingTranscript(false);
+      }
+    },
+    [token, setActiveId, onLogout],
+  );
+
+  // Restore whatever was open before the reload.
+  const restored = useRef(false);
+  useEffect(() => {
+    if (restored.current || loading) return;
+    restored.current = true;
+    if (activeId) openConversation(activeId);
+  }, [loading, activeId, openConversation]);
+
+  function startNewChat() {
+    abortRef.current?.abort();
+    convId.current = null;
+    setActiveId(null);
+    setMessages([]);
+    setBusy(false);
+    if (window.innerWidth < 768) setSidebarOpen(false);
+  }
+
+  function deleteConversation(id: string) {
+    // Without clearing the pointer, the next message would post to the deleted id and the
+    // server would recreate the conversation from scratch.
+    if (id === convId.current) {
+      abortRef.current?.abort();
+      convId.current = null;
+      setMessages([]);
+      setBusy(false);
+    }
+    remove(id);
+  }
+
+  function selectConversation(id: string) {
+    if (id === activeId) return;
+    abortRef.current?.abort();
+    setBusy(false);
+    openConversation(id);
+    if (window.innerWidth < 768) setSidebarOpen(false);
   }
 
   async function send(text: string) {
     if (!text.trim() || busy) return;
-    setInput('');
     setBusy(true);
 
     const userMsg: ChatMessage = { id: crypto.randomUUID(), role: 'user', text };
     const asstId = crypto.randomUUID();
-    const asstMsg: ChatMessage = {
+    setMessages((m) => [...m, userMsg, {
       id: asstId,
       role: 'assistant',
+      prompt: text,
       renderState: emptyRenderState(),
       loading: true,
       loadingMessage: 'Thinking…',
-    };
-    setMessages((m) => [...m, userMsg, asstMsg]);
-    scrollToBottom();
+    }]);
+    listRef.current?.scrollToBottom();
 
     const update = (fn: (msg: ChatMessage) => ChatMessage) =>
       setMessages((m) => m.map((msg) => (msg.id === asstId ? fn(msg) : msg)));
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const wasNew = convId.current === null;
 
     const newCid = await streamChat(token, text, convId.current, {
       onEvent: (evt) => {
@@ -64,7 +148,7 @@ export default function Chat({ token, user, onLogout }: {
             loading: false,
             renderState: reduceEvent(msg.renderState ?? emptyRenderState(), evt),
           }));
-          scrollToBottom();
+          listRef.current?.scrollToBottom();
         }
       },
       onError: (message) => {
@@ -77,86 +161,69 @@ export default function Chat({ token, user, onLogout }: {
       onDone: () => {
         update((msg) => ({ ...msg, loading: false }));
         setBusy(false);
-        scrollToBottom();
+        listRef.current?.scrollToBottom();
       },
-    });
-    if (newCid) convId.current = newCid;
+    }, controller.signal);
+
+    if (abortRef.current === controller) abortRef.current = null;
+
+    // An aborted turn may still resolve with its id; adopting it would drag the user back
+    // to a conversation they have already navigated away from.
+    if (newCid && !controller.signal.aborted) {
+      convId.current = newCid;
+      setActiveId(newCid);
+    }
+    // The list needs the new title on the first turn, and the new ordering after any turn.
+    if (newCid || wasNew) refresh();
   }
 
+  function stop() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setBusy(false);
+    // The turn still completes server-side, so the stored answer is the full one.
+    refresh();
+  }
+
+  function retry(prompt: string) {
+    if (busy) return;
+    send(prompt);
+  }
+
+  const title = activeId
+    ? conversations.find((c) => c.conversationId === activeId)?.title ?? NEW_CHAT_TITLE
+    : NEW_CHAT_TITLE;
+
   return (
-    <div className="mx-auto flex h-full max-w-3xl flex-col">
-      <header className="flex items-center justify-between px-4 py-3">
-        <div>
-          <h1 className="font-semibold text-slate-800">Admissions & Finance Agent</h1>
-          <p className="text-xs text-slate-500">Signed in as {user}</p>
-        </div>
-        <button onClick={onLogout} className="text-sm text-slate-500 hover:text-slate-800">
-          Sign out
-        </button>
-      </header>
+    <div className="flex h-full overflow-hidden bg-slate-50">
+      <Sidebar
+        conversations={conversations}
+        activeId={activeId}
+        loading={loading}
+        open={sidebarOpen}
+        onSelect={selectConversation}
+        onNew={startNewChat}
+        onRename={rename}
+        onDelete={deleteConversation}
+        onClose={() => setSidebarOpen(false)}
+      />
 
-      <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-4 pb-4">
-        {messages.length === 0 && (
-          <div className="mt-10 text-center">
-            <p className="text-slate-500">Ask about admissions, finance, retention, or ARPU.</p>
-            <div className="mt-4 flex flex-wrap justify-center gap-2">
-              {SUGGESTED.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => send(s)}
-                  className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:border-indigo-400"
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {messages.map((msg) =>
-          msg.role === 'user' ? (
-            <div key={msg.id} className="flex justify-end">
-              <div className="max-w-[80%] rounded-2xl bg-indigo-600 px-4 py-2 text-sm text-white">
-                {msg.text}
-              </div>
-            </div>
-          ) : (
-            <div key={msg.id} className="flex justify-start">
-              <div className="max-w-[90%] rounded-2xl bg-white px-4 py-3 text-sm shadow-sm">
-                {msg.loading && (
-                  <p className="animate-pulse text-slate-500">{msg.loadingMessage}</p>
-                )}
-                {msg.error && <p className="text-red-600">{msg.error}</p>}
-                {msg.renderState && <RenderMessage state={msg.renderState} />}
-              </div>
-            </div>
-          ),
-        )}
-      </div>
-
-      <div className="border-t border-slate-200 bg-white p-3">
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            send(input);
-          }}
-          className="flex items-center gap-2"
-        >
-          <input
-            className="flex-1 rounded-full border border-slate-300 px-4 py-2 text-sm focus:border-indigo-400 focus:outline-none"
-            placeholder="Ask a question about admissions, finance, or ARPU…"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={busy}
-          />
-          <button
-            type="submit"
-            disabled={busy || !input.trim()}
-            className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-          >
-            Send
-          </button>
-        </form>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <ChatHeader
+          title={title}
+          user={user}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen((o) => !o)}
+          onLogout={onLogout}
+        />
+        <MessageList
+          ref={listRef}
+          messages={messages}
+          loadingTranscript={loadingTranscript}
+          onPick={send}
+          onRetry={retry}
+        />
+        <ChatInput busy={busy} disabled={loadingTranscript} onSend={send} onStop={stop} />
       </div>
     </div>
   );

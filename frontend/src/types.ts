@@ -34,4 +34,29 @@ export interface ChatMessage {
   loading?: boolean;
   loadingMessage?: string;
   error?: string;
+  // The question that produced this answer, so it can be retried from the message itself.
+  prompt?: string;
+}
+
+export interface Conversation {
+  conversationId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+export interface TranscriptMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  renderState: RenderState | null;
+  createdAt: string;
+}
+
+export interface ConversationDetail {
+  conversationId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: TranscriptMessage[];
 }

@@ -58,11 +58,12 @@ def add_block(block: dict[str, Any]) -> str:
     ])
 
 
-def add_text_part(content: str) -> str:
+def add_text_part(content: str, part_id: str | None = None) -> str:
     """JSON-Patch to append a standalone text part (used for the provenance footnote)."""
     return state_delta([{
         "op": "add", "path": "/parts/-",
-        "value": {"type": "text", "id": f"text-{uuid.uuid4().hex[:8]}", "content": content},
+        "value": {"type": "text", "id": part_id or f"text-{uuid.uuid4().hex[:8]}",
+                  "content": content},
     }])
 
 

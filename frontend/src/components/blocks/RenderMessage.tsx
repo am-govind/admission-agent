@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import type { ContentBlock, RenderState } from '../../types';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -5,33 +6,89 @@ import {
   ResponsiveContainer, BarChart, Bar, LineChart, Line, AreaChart, Area,
   PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from 'recharts';
+import { CheckIcon, CopyIcon, DownloadIcon } from '../Icons';
+import { downloadCsv, downloadSvgAsPng, slug, toCsv } from './download';
+
+/**
+ * Toolbar over a table or chart. Revealed on hover at desktop sizes, but always visible
+ * on touch screens, where there is no hover to reveal it with.
+ */
+function BlockActions({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="absolute right-2 top-2 z-10 flex gap-1 transition-opacity md:opacity-0 md:group-hover/block:opacity-100 md:focus-within:opacity-100">
+      {children}
+    </div>
+  );
+}
+
+function ActionButton({ label, onClick, children }: {
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="rounded-lg border border-slate-200 bg-white/90 p-1.5 text-slate-500 shadow-sm backdrop-blur transition hover:text-indigo-600"
+    >
+      {children}
+    </button>
+  );
+}
 
 function TableBlock({ block }: { block: Extract<ContentBlock, { type: 'table' }> }) {
   const { columns, rows } = block.data;
+  const title = (block.data as { title?: string }).title ?? '';
+  const [copied, setCopied] = useState(false);
+  // Long results scroll inside the block instead of pushing the answer off screen.
+  const tall = rows.length > 12;
+
+  async function copy() {
+    await navigator.clipboard.writeText(toCsv(columns, rows));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  }
+
   return (
-    <div className="my-3 overflow-x-auto rounded-xl border border-slate-200 shadow-sm">
-      <table className="min-w-full text-sm">
-        <thead className="bg-slate-100/80">
-          <tr>
-            {columns.map((c) => (
-              <th key={c} className="px-4 py-2.5 text-left font-semibold text-slate-700 border-b border-slate-200">
-                {c}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {rows.map((r, i) => (
-            <tr key={i} className={i % 2 ? 'bg-white' : 'bg-slate-50/50 hover:bg-slate-100/50 transition-colors'}>
-              {r.map((cell, j) => (
-                <td key={j} className="px-4 py-2 text-slate-700">
-                  {String(cell).replace(/T00:00:00.*/, '')}
-                </td>
+    <div className="group/block relative my-3 rounded-xl border border-slate-200 shadow-sm">
+      <BlockActions>
+        <ActionButton label="Copy as CSV" onClick={copy}>
+          {copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
+        </ActionButton>
+        <ActionButton
+          label="Download CSV"
+          onClick={() => downloadCsv(columns, rows, slug(title, 'table'))}
+        >
+          <DownloadIcon className="h-3.5 w-3.5" />
+        </ActionButton>
+      </BlockActions>
+
+      <div className={`overflow-auto rounded-xl ${tall ? 'max-h-96' : ''}`}>
+        <table className="min-w-full text-sm">
+          <thead className="sticky top-0 z-[1] bg-slate-100">
+            <tr>
+              {columns.map((c) => (
+                <th key={c} className="px-4 py-2.5 text-left font-semibold text-slate-700 border-b border-slate-200">
+                  {c}
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {rows.map((r, i) => (
+              <tr key={i} className={i % 2 ? 'bg-white' : 'bg-slate-50/50 hover:bg-slate-100/50 transition-colors'}>
+                {r.map((cell, j) => (
+                  <td key={j} className="px-4 py-2 text-slate-700">
+                    {String(cell).replace(/T00:00:00.*/, '')}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -69,6 +126,7 @@ function compact(n: number): string {
 
 function ChartBlock({ block }: { block: Extract<ContentBlock, { type: 'chart' }> }) {
   const { kind, x, y, title, rows } = block.data;
+  const containerRef = useRef<HTMLDivElement>(null);
   const tick = { fill: '#64748b', fontSize: 11 };
   const crowded = rows.length > 6;
   const tooltip = {
@@ -135,9 +193,22 @@ function ChartBlock({ block }: { block: Extract<ContentBlock, { type: 'chart' }>
     );
   }
 
+  function downloadPng() {
+    const svg = containerRef.current?.querySelector('svg');
+    if (svg) downloadSvgAsPng(svg as SVGSVGElement, slug(title ?? '', 'chart'));
+  }
+
   return (
-    <div className="my-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-      {title && <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</p>}
+    <div
+      ref={containerRef}
+      className="group/block relative my-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+    >
+      <BlockActions>
+        <ActionButton label="Download PNG" onClick={downloadPng}>
+          <DownloadIcon className="h-3.5 w-3.5" />
+        </ActionButton>
+      </BlockActions>
+      {title && <p className="mb-3 pr-16 text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</p>}
       <ResponsiveContainer width="100%" height={280}>
         {chart}
       </ResponsiveContainer>

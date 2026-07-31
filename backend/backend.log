@@ -1,0 +1,12 @@
+2026-08-01 03:27:20 INFO    app.core.logs [-] Logging at INFO (text), file /Users/govindmishra/Development/admission-agent/backend/backend.log
+2026-08-01 03:27:20 INFO    uvicorn.error [-] Started server process [83172]
+2026-08-01 03:27:20 INFO    uvicorn.error [-] Waiting for application startup.
+2026-08-01 03:27:20 INFO    app.main [-] Starting Admissions & Finance AI Agent in development mode on 0.0.0.0:8500
+2026-08-01 03:27:20 INFO    app.main [-] Analytics DB /Users/govindmishra/Development/admission-agent/backend/data/analytics.duckdb, app DB /Users/govindmishra/Development/admission-agent/backend/data/app.sqlite3, data source sample
+2026-08-01 03:27:20 INFO    app.main [-] Data status: {'rd26': 4000, 'rd25': 4200, 'finance_dump': 4000, 'targets': 53}
+2026-08-01 03:27:20 INFO    app.main [-] Refresh scheduler armed for 08:30 Asia/Kolkata (polling every 900s)
+2026-08-01 03:27:20 INFO    uvicorn.error [-] Application startup complete.
+2026-08-01 03:28:50 INFO    app.main [bea7dcb3d726] GET /conversations -> 200 in 5ms
+2026-08-01 03:28:50 INFO    uvicorn.access [bea7dcb3d726] 127.0.0.1:53681 - "GET /conversations HTTP/1.1" 200
+2026-08-01 03:28:50 INFO    app.main [d6ceba030c3f] GET /conversations -> 200 in 4ms
+2026-08-01 03:28:50 INFO    uvicorn.access [d6ceba030c3f] 127.0.0.1:53682 - "GET /conversations HTTP/1.1" 200

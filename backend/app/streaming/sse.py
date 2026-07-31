@@ -11,9 +11,10 @@ from ..agent.llm import LlmUnavailable
 from ..agent.memory import history_for_prompt
 from ..agent.runtime import run_turn
 from ..core.logs import bind_conversation
-from ..data.conversation import add_message, next_turn
+from ..data.conversation import add_message, next_turn, set_title_if_missing
 from ..guardrails import GuardrailError, scan_input, scan_output
 from . import events
+from .render import build_render_state, provenance_line
 
 
 def _chunk(text: str, size: int = 3) -> list[str]:
@@ -40,6 +41,7 @@ async def stream_turn(message: str, conversation_id: str) -> AsyncIterator[str]:
 
     turn = next_turn(conversation_id)
     add_message(conversation_id, turn, "user", message)
+    set_title_if_missing(conversation_id, message)
     history = history_for_prompt(conversation_id)
 
     # The turn reports progress through a queue so each tool call can be surfaced while
@@ -81,24 +83,27 @@ async def stream_turn(message: str, conversation_id: str) -> AsyncIterator[str]:
 
     yield events.thinking_end()
 
+    # The state assembled here is both what the client rebuilds from the frames below and
+    # what gets stored, so reopening the conversation replays the same charts and tables.
+    part_id = f"part-{uuid.uuid4().hex[:10]}"
+    provenance_part_id = f"text-{uuid.uuid4().hex[:8]}"
+    state, stored = build_render_state(output, answer, part_id, provenance_part_id)
+
     # Charts and tables first so the visual lands before the prose.
     for block in output.artifacts:
         yield events.add_block(block.model_dump())
 
-    part_id = f"part-{uuid.uuid4().hex[:10]}"
     yield events.text_message_start(part_id)
     for chunk in _chunk(answer):
         yield events.text_message_content(part_id, chunk)
         await asyncio.sleep(0.02)
     yield events.text_message_end(part_id)
 
-    stored = answer
-    if output.provenance:
-        provenance = "How I got this: " + " | ".join(dict.fromkeys(output.provenance))
-        yield events.add_text_part(provenance)
-        stored = f"{answer}\n\n{provenance}"
+    provenance = provenance_line(output.provenance)
+    if provenance:
+        yield events.add_text_part(provenance, provenance_part_id)
 
-    add_message(conversation_id, turn, "assistant", stored)
+    add_message(conversation_id, turn, "assistant", stored, state.model_dump())
     yield events.run_finished(thread_id, run_id, {
         "skill": output.skill_id, "skillName": output.skill_name,
         "routeReason": output.route_reason, "routeMethod": output.route_method,
