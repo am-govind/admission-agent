@@ -66,9 +66,9 @@ async def stream_turn(message: str, conversation_id: str) -> AsyncIterator[str]:
         logging.getLogger(__name__).error("Model unavailable for the whole turn: %s", e)
         yield events.thinking_end()
         yield events.run_error(
-            thread_id, run_id, "MODEL_UNAVAILABLE",
-            "The language model is not responding right now. Please try again in a "
-            "moment — your data is loaded and unaffected.")
+            thread_id, run_id,
+            "QUOTA_EXHAUSTED" if e.quota_exhausted else "MODEL_UNAVAILABLE",
+            e.user_message())
         return
     except Exception as e:  # noqa: BLE001 - the client needs one clean error frame
         logging.getLogger(__name__).error("Turn crashed:\n%s", traceback.format_exc())

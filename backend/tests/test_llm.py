@@ -9,6 +9,7 @@ each and are still true.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import types
 
 import pytest
@@ -35,9 +36,38 @@ def _empty_choices(detail: str = "upstream 500") -> object:
 
 
 class _HttpError(Exception):
-    def __init__(self, status: int, message: str = "boom"):
+    def __init__(self, status: int, message: str = "boom", body: dict | None = None):
         super().__init__(message)
         self.status_code = status
+        self.body = body
+
+
+# Reproduced from a real OpenRouter response: the rate-limit headers are nested inside
+# the error metadata rather than returned on the response.
+_DAILY_QUOTA_BODY = {
+    "message": ("Rate limit exceeded: free-models-per-day. Add 10 credits to unlock "
+                "1000 free model requests per day"),
+    "code": 429,
+    "metadata": {
+        "headers": {"X-RateLimit-Limit": "50", "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": "1785542400000"},
+        "limit_source": "openrouter_free_tier_daily",
+        "remedy_hint": "Wait for the daily reset (see X-RateLimit-Reset)",
+    },
+}
+
+
+def _daily_quota() -> _HttpError:
+    return _HttpError(429, str(_DAILY_QUOTA_BODY), body={"error": _DAILY_QUOTA_BODY})
+
+
+def _momentary_rate_limit() -> _HttpError:
+    """A per-minute limit: requests remain, and it clears while we back off."""
+    body = {"message": "Rate limit exceeded: 20 requests per minute", "code": 429,
+            "metadata": {"headers": {"X-RateLimit-Limit": "20",
+                                     "X-RateLimit-Remaining": "3"},
+                         "limit_source": "provider_per_minute"}}
+    return _HttpError(429, str(body), body={"error": body})
 
 
 class _StubClient:
@@ -153,6 +183,107 @@ def test_no_api_key_raises_rather_than_calling_out(monkeypatch):
     assert not llm.configured()
     with pytest.raises(llm.LlmUnavailable):
         asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+
+
+# ---------- an exhausted quota is not a transient failure ----------
+
+def test_a_daily_quota_is_not_retried(stub):
+    """It cannot clear inside this turn, so retrying only delays a certain failure."""
+    client = stub([_daily_quota()] * 10)
+    with pytest.raises(llm.LlmUnavailable):
+        asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+    assert len(client.models) == 1, f"made {len(client.models)} doomed calls"
+
+
+def test_a_daily_quota_skips_the_fallback_models(stub, monkeypatch):
+    """The limit is charged to the account, so every model is equally blocked."""
+    monkeypatch.setattr(settings, "llm_fallback_models", "backup/one,backup/two")
+    client = stub([_daily_quota()] * 10)
+    with pytest.raises(llm.LlmUnavailable):
+        asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+    assert client.models == [settings.llm_model]
+
+
+def test_a_momentary_rate_limit_is_still_retried(stub):
+    """The distinction has to survive: per-minute limits do clear while we wait."""
+    client = stub([_momentary_rate_limit(), _ok("recovered")])
+    message = asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+    assert message.content == "recovered"
+    assert len(client.models) == 2
+
+
+def test_a_quota_failure_carries_its_reset_time(stub):
+    stub([_daily_quota()])
+    with pytest.raises(llm.LlmUnavailable) as caught:
+        asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+    error = caught.value
+    assert error.quota_exhausted
+    assert error.retry_at == dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc)
+
+
+def test_the_quota_message_names_the_reset_time_in_local_terms(stub):
+    stub([_daily_quota()])
+    with pytest.raises(llm.LlmUnavailable) as caught:
+        asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+    text = caught.value.user_message()
+    # 00:00 UTC is 05:30 in Asia/Kolkata, the configured business timezone.
+    assert "05:30" in text
+    assert "quota" in text.lower()
+    assert "data is loaded and unaffected" in text
+
+
+def test_an_outage_message_does_not_mention_a_quota(stub):
+    stub([_HttpError(503)] * 10)
+    with pytest.raises(llm.LlmUnavailable) as caught:
+        asyncio.run(llm.complete([{"role": "user", "content": "hi"}]))
+    error = caught.value
+    assert not error.quota_exhausted
+    assert error.retry_at is None
+    assert "quota" not in error.user_message().lower()
+    assert "try again" in error.user_message()
+
+
+def test_reset_timestamps_are_read_in_seconds_or_milliseconds():
+    """Providers disagree; guessing wrong would put the reset in 1970 or the year 5138."""
+    expected = dt.datetime(2026, 8, 1, tzinfo=dt.timezone.utc)
+    assert llm._reset_at({"X-RateLimit-Reset": "1785542400000"}) == expected
+    assert llm._reset_at({"X-RateLimit-Reset": "1785542400"}) == expected
+    for junk in ({}, {"X-RateLimit-Reset": "soon"}, {"X-RateLimit-Reset": "0"}):
+        assert llm._reset_at(junk) is None
+
+
+def test_zero_remaining_is_enough_on_its_own():
+    """Providers word the reason inconsistently; the header is the reliable signal."""
+    body = {"message": "too many requests", "code": 429,
+            "metadata": {"headers": {"X-RateLimit-Remaining": "0"}}}
+    quota = llm._quota_exhausted(_HttpError(429, "too many", body={"error": body}))
+    assert quota is not None
+
+
+def test_a_bare_429_with_no_detail_is_treated_as_transient():
+    """Without evidence of exhaustion, assume the limit is momentary and retry."""
+    assert llm._quota_exhausted(_HttpError(429, "slow down")) is None
+
+
+def test_only_429s_are_considered_quota_failures():
+    assert llm._quota_exhausted(_HttpError(500, "server error")) is None
+    assert llm._quota_exhausted(_daily_quota()) is not None
+
+
+# ---------- log lines stay readable ----------
+
+def test_log_detail_is_trimmed_to_the_providers_own_message():
+    """The full body ran to ~700 characters and was logged nine times per failed turn."""
+    brief = llm._brief(_daily_quota())
+    assert len(brief) <= llm._LOG_DETAIL_CHARS + 20
+    assert "free-models-per-day" in brief
+    assert "X-RateLimit" not in brief, "header noise belongs in the diagnosis, not the log"
+    assert brief.startswith("HTTP 429")
+
+
+def test_log_detail_survives_an_error_with_no_body():
+    assert "boom" in llm._brief(_HttpError(503, "boom"))
+    assert "kaboom" in llm._brief(RuntimeError("kaboom"))
 
 
 # ---------- request options ----------

@@ -50,10 +50,11 @@ async def chat(body: ChatRequest, user: str = Depends(current_user)) -> ChatResp
     try:
         output = await run_turn(body.message, cid, history)
     except LlmUnavailable as e:
+        # 429 rather than 503 for a quota, so a client can tell "come back later" from
+        # "the service is broken" without parsing the message.
         raise HTTPException(
-            status_code=503,
-            detail="The language model is not responding right now. Please try again in "
-                   "a moment — your data is loaded and unaffected.") from e
+            status_code=429 if e.quota_exhausted else 503,
+            detail=e.user_message()) from e
     except Exception as e:  # noqa: BLE001 - surface a clean error to the client
         raise HTTPException(
             status_code=503, detail=f"The model service is unavailable: {e}") from e

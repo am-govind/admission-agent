@@ -192,6 +192,20 @@ tool calling. If every model fails *after* some tools have already run, the turn
 answers from those results and says the write-up is missing — the charts and tables render
 either way, because the numbers were already computed.
 
+One 429 is not retried: an exhausted **daily** allowance. Retrying cannot help before the
+reset, and free-tier caps are charged to the account rather than the model, so the fallback
+models are already blocked too — walking the chain would spend twenty seconds proving what
+the first response said. It stops on the first reply and names the reset time instead:
+
+```
+ERROR app.agent.llm | routing stopped: provider quota exhausted
+      (openrouter_free_tier_daily); limit 50; resets 2026-08-01T00:00:00+00:00
+```
+
+OpenRouter's free tier allows 50 requests a day, and one question costs two to four of
+them — routing, then a call per tool-loop iteration. Roughly fifteen questions a day. To
+raise it, add credit, or point `LLM_BASE_URL` at a local Ollama, which has no cap.
+
 ---
 
 ## 3. Frontend
@@ -301,7 +315,8 @@ per-user audit trail real rather than aspirational.
 | Chat replies "the language model is not configured" | no `LLM_API_KEY` | set one per §2, then restart |
 | `/chat` → `503` | the configured endpoint is unreachable | check `LLM_BASE_URL`; for Ollama make sure `ollama serve` is running |
 | A reply opens "I could not reach the language model" but the figures and charts are there | the provider failed after the tools ran; the answer was assembled from the tool summaries | the numbers are correct — retry for the prose, or add `LLM_FALLBACK_MODELS` per §2d |
-| "The language model is not responding right now" | every model in the chain failed before any tool ran | check the provider's status and your daily cap; the log names each attempt |
+| "The language model is not responding right now" | every model in the chain failed before any tool ran | check the provider's status; the log names each attempt |
+| "The daily quota for the configured model provider is used up", or `/chat` → `429` | the free-tier daily cap is spent; fallback models share it, so they are spent too | wait for the reset time in the message, add credit, or switch to a local Ollama per §2d |
 | `/chat` → `410`, or an error naming `github_models_retirement_brownout` | `.env` still points at the retired GitHub Models | switch `LLM_BASE_URL` and `LLM_MODEL` per §2a |
 | Replies ignore your data and answer only in generalities | the chosen model has no tool-calling support | pick one from the §2a list; free models without `tools` cannot query anything |
 | `404` naming the model, on OpenRouter | dropped the `:free` suffix, or the model was withdrawn | re-run the model-list command in §2a |
