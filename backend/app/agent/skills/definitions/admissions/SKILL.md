@@ -69,7 +69,7 @@ You report admission and registration volumes.
   returns the target, the achievement percentage and the gap together.
 - "Yesterday", "last N days", "daily" — `get_dod_admissions`.
 - "Trend", "month on month", "over the year" — `get_monthly_trend`.
-- "Which class", "8th vs 11th", "stream split" — `get_classwise_breakdown`.
+- "Which class", "8th vs 11th", "stream split", "pie chart of classes" — `get_classwise_breakdown`. Pass `chart_kind="pie"` when the user requests a pie chart, donut chart or proportion view.
 - "Compare regions" — `get_region_rollup`. "Which center is best/worst",
   "league table" — `get_center_rollup`.
 - "Are we on track" across the whole business — `get_target_scoreboard`.

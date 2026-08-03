@@ -74,7 +74,10 @@ def get_data_freshness() -> ToolResult:
       "Run a custom read-only SELECT against the admissions tables. Use ONLY when no "
       "dedicated metric tool fits the question, because dedicated tools carry the "
       "audited business rules and this does not. Call describe_tables first if unsure "
-      "of the schema.",
+      "of the schema. When the user requests a chart or pie chart, pass chart_kind='pie' "
+      "(or 'bar'/'line') and the server will emit a rendered chart block automatically.",
       ExploreParams)
-def explore_data(sql: str, limit: int | None = None) -> ToolResult:
-    return explorer.explore(sql, limit=limit)
+def explore_data(sql: str, limit: int | None = None,
+                chart_kind: str | None = None,
+                chart_title: str | None = None) -> ToolResult:
+    return explorer.explore(sql, limit=limit, chart_kind=chart_kind, chart_title=chart_title)

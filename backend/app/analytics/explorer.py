@@ -23,7 +23,7 @@ from ..core.database import readonly_conn
 from ..data import availability
 from ..data.schema import ANALYTICS_TABLES, PII_COLUMNS, TABLE_COLUMN_TYPES
 from .query import provenance
-from .result import ToolResult
+from .result import CHART_KINDS, ChartSpec, ToolResult
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,9 @@ def validate(sql: str) -> None:
             "selected or filtered on. Aggregate instead, or group by center, class or date.")
 
 
-def explore(sql: str, limit: int | None = None) -> ToolResult:
+def explore(sql: str, limit: int | None = None,
+            chart_kind: str | None = None,
+            chart_title: str | None = None) -> ToolResult:
     """Run a validated read-only SELECT and return the rows."""
     try:
         validate(sql)
@@ -128,12 +130,29 @@ def explore(sql: str, limit: int | None = None) -> ToolResult:
     if truncated:
         summary += f" Output is capped at {cap} rows, so there may be more."
 
+    # Build a chart spec when the caller requests one and the data is chartable.
+    # Convention: first column = x-axis label; every subsequent numeric column = a series.
+    chart: ChartSpec | None = None
+    kind = (chart_kind or "").lower()
+    if kind in CHART_KINDS and len(columns) >= 2 and len(table) >= 2:
+        x_col = columns[0]
+        # Detect numeric columns by inspecting the first non-null value in each column.
+        y_cols = []
+        for ci, col in enumerate(columns[1:], 1):
+            first_val = next((r[ci] for r in table if r[ci] is not None), None)
+            if isinstance(first_val, (int, float)):
+                y_cols.append(col)
+        if y_cols:
+            title = chart_title or summary
+            chart = ChartSpec(kind=kind, x=x_col, y=y_cols, title=title)  # type: ignore[arg-type]
+
     return ToolResult(
         metric=_METRIC,
         summary=summary,
         values={"row_count": len(table), "truncated": truncated},
         columns=columns,
         rows=table,
+        chart=chart,
         provenance=provenance(_METRIC, ["custom query"], [], None, row_count=len(table),
                               notes=[f"read-only query capped at {cap} rows"]),
     )

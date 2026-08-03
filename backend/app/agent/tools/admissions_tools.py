@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from ...analytics import admissions
 from ...analytics.result import ToolResult
-from .registry import (AdmissionsCompareParams, AdmissionsDailyParams,
-                       AdmissionsFilterParams, AdmissionsMonthlyParams,
-                       AdmissionsScopeParams, AdmissionsTrendParams, tool)
+from .registry import (AdmissionsClasswiseParams, AdmissionsCompareParams,
+                       AdmissionsDailyParams, AdmissionsFilterParams,
+                       AdmissionsMonthlyParams, AdmissionsScopeParams,
+                       AdmissionsTrendParams, tool)
 
 
 @tool("get_fresh_registrations",
@@ -62,15 +63,18 @@ def get_monthly_trend(center: str | None = None, region: str | None = None,
 @tool("get_classwise_breakdown",
       "Registrations split across the nine tracked classes (8th, 9th, 10th, 11th JEE, "
       "11th NEET, 12th JEE, 12th NEET, Dropper JEE, Dropper NEET). Supports filtering "
-      "to specific classes via the 'classes' parameter, and 'compare' to chart the "
-      "class mix of two or more scopes side by side.",
-      AdmissionsCompareParams)
+      "to specific classes via the 'classes' parameter, 'compare' to chart the "
+      "class mix of two or more scopes side by side, and 'chart_kind' ('bar' or 'pie') "
+      "for chart styling.",
+      AdmissionsClasswiseParams)
 def get_classwise_breakdown(center: str | None = None, region: str | None = None,
                             classes: list[str] | None = None,
                             exclude: str | None = None,
-                            compare: list[str] | None = None) -> ToolResult:
+                            compare: list[str] | None = None,
+                            chart_kind: str | None = None) -> ToolResult:
     return admissions.classwise_breakdown(center=center, region=region, classes=classes,
-                                          exclude=exclude, compare=compare)
+                                          exclude=exclude, compare=compare,
+                                          chart_kind=chart_kind)
 
 
 @tool("get_pending_admissions",

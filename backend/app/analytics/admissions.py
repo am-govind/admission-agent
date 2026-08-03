@@ -281,7 +281,8 @@ def monthly_trend(center: str | None = None, region: str | None = None,
 def classwise_breakdown(center: str | None = None, region: str | None = None,
                         classes: list[str] | None = None,
                         exclude: str | None = None,
-                        compare: list[str] | None = None) -> ToolResult:
+                        compare: list[str] | None = None,
+                        chart_kind: str | None = None) -> ToolResult:
     """Registrations per class/stream. Daily_tracker D128..L128.
 
     Uses the inclusive threshold (>= 3498), unlike the registration total, and covers
@@ -290,7 +291,7 @@ def classwise_breakdown(center: str | None = None, region: str | None = None,
     metric = "classwise_breakdown"
     if compare:
         return compare_series(metric, compare, lambda term: classwise_breakdown(
-            center=term, classes=classes))
+            center=term, classes=classes, chart_kind=chart_kind))
 
     scope, selected, blocked = _scoped(metric, center, region, exclude, classes)
     if blocked:
@@ -313,6 +314,7 @@ def classwise_breakdown(center: str | None = None, region: str | None = None,
 
     class_note = (f"{len(tokens)} selected classes" if selected.requested
                   else "nine tracked classes only")
+    kind = "pie" if (chart_kind and chart_kind.lower() == "pie") else "bar"
     return ToolResult(
         metric=metric,
         summary=(f"{fmt_int(total)} registrations across {class_note} for "
@@ -321,7 +323,7 @@ def classwise_breakdown(center: str | None = None, region: str | None = None,
                 "scope": scope.describe()},
         columns=["Class", "Registrations"],
         rows=rows,
-        chart=ChartSpec(kind="bar", x="Class", y=["Registrations"],
+        chart=ChartSpec(kind=kind, x="Class", y=["Registrations"],
                         title=f"Class-wise registrations — {scope.describe()}"),
         provenance=provenance(metric, [TABLE_RD26], clauses, scope, row_count=total,
                               notes=[class_note]),

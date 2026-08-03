@@ -174,6 +174,12 @@ class AdmissionsCompareParams(AdmissionsFilterParams):
                           "scope. Overrides center and region when set.")
 
 
+class AdmissionsClasswiseParams(AdmissionsCompareParams):
+    chart_kind: str | None = Field(
+        None, description="Visual style for the chart: 'bar' or 'pie'. Pass 'pie' "
+                          "when the user asks for a pie chart, donut chart or distribution visual.")
+
+
 class AdmissionsDailyParams(AdmissionsCompareParams):
     days: int = Field(20, ge=1, le=90, description="How many days back to report.")
 
@@ -227,3 +233,10 @@ class ExploreParams(Params):
                          "computed columns to readable names.")
     limit: int | None = Field(
         None, ge=1, description="Row cap; the server applies its own maximum as well.")
+    chart_kind: str | None = Field(
+        None, description="Render the result as a chart: 'bar', 'line', 'area', or 'pie'. "
+                          "The first column becomes the x-axis / label; every subsequent "
+                          "numeric column becomes a series. Use 'pie' when the user asks "
+                          "for a pie or donut chart.")
+    chart_title: str | None = Field(
+        None, description="Title shown above the chart. Omit to use the SQL summary.")
