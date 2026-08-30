@@ -22,6 +22,7 @@ google-auth==2.35.0
 
 # Tests.
 pytest==8.3.3
+httpx>=0.27.0
 
 # Charts are rendered client-side from chart content blocks, so no server-side plotting
 # library is needed. Guardrails use a built-in rule set rather than llm-guard.
