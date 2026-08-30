@@ -178,6 +178,7 @@ def describe_tables() -> ToolResult:
         values={"tables": len([r for r in rows if r[2]])},
         columns=["Table", "Description", "Rows", "Columns"],
         rows=rows,
+        chartable=False,
         provenance=provenance("describe_tables", list(ANALYTICS_TABLES), [], None),
     )
 
@@ -270,5 +271,6 @@ def preview_columns(table: str) -> ToolResult:
         values={"table": name, "columns": len(rows)},
         columns=["Column", "Type", "Distinct", "Sample values"],
         rows=rows,
+        chartable=False,
         provenance=provenance(metric, [name], [], None, row_count=len(rows)),
     )

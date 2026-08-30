@@ -11,7 +11,9 @@ import datetime as dt
 import pytest
 
 from app.agent import runtime
-from app.analytics import admissions, revenue, rollups
+from app.analytics import (admissions, explorer, finance, retention, revenue, rollups,
+                           series)
+from app.analytics.result import ChartSpec, ToolResult
 from app.core import appdb
 from app.core.config import settings
 from app.data import availability
@@ -72,6 +74,100 @@ def test_block_ids_are_unique():
                                  admissions.classwise_breakdown()])
     ids = [b.id for b in blocks]
     assert len(set(ids)) == len(ids)
+
+
+# ---------- every chartable result is charted ----------
+
+@pytest.mark.parametrize("result_fn", [
+    lambda: retention.senior_retention(),
+    lambda: finance.loan_eligibility(),
+    lambda: finance.second_emi(),
+    lambda: finance.finance_summary(),
+    lambda: rollups.target_scoreboard(),
+    lambda: admissions.admissions_summary(),
+])
+def test_a_table_result_is_always_charted(result_fn):
+    """A table with a numeric column is a chart the user did not have to ask for."""
+    result = result_fn()
+    if not result.ok:
+        pytest.skip(result.decline_reason())
+    blocks, _ = runtime._blocks([result])
+    assert [b.type for b in blocks] == ["chart", "table"]
+
+
+def test_a_table_without_a_spec_is_charted_by_inference():
+    result = explorer.explore(
+        "SELECT center, COUNT(*) AS students FROM rd26 GROUP BY center LIMIT 5")
+    assert result.ok, result.decline_reason()
+    assert result.chart is None, "no chart_kind was passed, so nothing attached a spec"
+    chart = next(b for b in runtime._blocks([result])[0] if b.type == "chart")
+    assert chart.data["x"] == "center"
+    assert chart.data["y"] == ["students"]
+
+
+def test_inference_ignores_a_column_that_is_only_sometimes_numeric():
+    """A count in one row and a formatted percentage in the next is not one axis."""
+    result = ToolResult(metric="mixed", columns=["Measure", "Value"],
+                        rows=[["Registrations", 1200], ["Achieved", "62.5%"]])
+    assert runtime._inferred_spec(result) is None
+
+
+def test_inference_stops_before_a_wall_of_bars():
+    rows = [[f"row {i}", i] for i in range(runtime.MAX_INFERRED_CHART_ROWS + 1)]
+    result = ToolResult(metric="long", columns=["Label", "Count"], rows=rows)
+    assert runtime._inferred_spec(result) is None
+
+
+def test_an_explicit_spec_is_charted_however_many_rows():
+    """The row cap guards guesses, not a leaderboard someone asked for."""
+    result = rollups.center_rollup("registrations")
+    assert len(result.rows) > runtime.MAX_INFERRED_CHART_ROWS
+    blocks, _ = runtime._blocks([result])
+    assert [b.type for b in blocks] == ["chart", "table"]
+
+
+@pytest.mark.parametrize("result_fn", [
+    explorer.describe_tables,
+    lambda: explorer.preview_columns("rd26"),
+])
+def test_results_describing_the_data_are_not_charted(result_fn):
+    """Row counts and column cardinality are not figures anyone wants plotted."""
+    result = result_fn()
+    if not result.ok:
+        pytest.skip(result.decline_reason())
+    blocks, _ = runtime._blocks([result])
+    assert [b.type for b in blocks] == ["table"]
+
+
+def test_a_row_with_no_number_to_plot_is_left_out_of_the_chart():
+    result = admissions.admissions_summary()
+    blocks, _ = runtime._blocks([result])
+    chart = next(b for b in blocks if b.type == "chart")
+    table = next(b for b in blocks if b.type == "table")
+    labels = [row[chart.data["x"]] for row in chart.data["rows"]]
+    assert not any("%" in label for label in labels)
+    assert "Largest class" not in labels
+    assert len(table.data["rows"]) > len(chart.data["rows"])
+
+
+def test_an_empty_row_keeps_its_place_in_the_chart():
+    """No data for a scope must read as a labelled gap, not as a missing scope."""
+    result = ToolResult(
+        metric="gaps", columns=["Region", "Registrations"],
+        rows=[["Maharashtra", 120], ["South", None], ["AP & TS", 80]],
+        chart=ChartSpec(kind="bar", x="Region", y=["Registrations"]))
+    chart = runtime._chart_block(result)
+    assert [row["Region"] for row in chart.data["rows"]] == \
+        ["Maharashtra", "South", "AP & TS"]
+
+
+def test_a_merged_comparison_is_never_a_pie():
+    """A pie draws one series, so a merged pie would silently drop every other scope."""
+    merged = series.merge([finance.loan_eligibility(center="Pune"),
+                           finance.loan_eligibility(center="Nagpur")])
+    assert merged is not None, "two scopes of the same metric should merge"
+    assert len(merged.chart.y) == 2
+    assert merged.chart.kind == "bar"
 
 
 # ---------- scheduling ----------

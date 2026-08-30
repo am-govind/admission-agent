@@ -199,6 +199,10 @@ def target_scoreboard() -> ToolResult:
         columns=["Region", "Registrations", "Reg target", "Reg %",
                  "This month", "Month target", "Month %"],
         rows=rows,
+        # The monthly pair is left off: a month's figures next to all-time ones share
+        # an axis without sharing a scale, and the monthly bars would be invisible.
+        chart=ChartSpec(kind="bar", x="Region", y=["Registrations", "Reg target"],
+                        title="Registrations against target by region"),
         provenance=provenance(metric, [TABLE_RD26], [], None, row_count=len(rows)),
     )
 

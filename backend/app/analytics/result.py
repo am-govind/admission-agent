@@ -101,6 +101,10 @@ class ToolResult:
     columns: list[str] = field(default_factory=list)
     rows: list[list[Any]] = field(default_factory=list)
     chart: ChartSpec | None = None
+    # Set False on results whose numbers describe the data rather than the business —
+    # row counts, column cardinality. The render layer infers a chart for any table
+    # with a numeric column, and charting those would be meaningless.
+    chartable: bool = True
     provenance: Provenance | None = None
     unavailable_reason: str | None = None
     clarification: str | None = None

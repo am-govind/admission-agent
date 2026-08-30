@@ -96,6 +96,8 @@ def loan_eligibility(center: str | None = None, region: str | None = None) -> To
                 "not_eligible_pct": pct(not_eligible, base), "scope": scope.describe()},
         columns=["Status", "Students"],
         rows=[["Eligible", eligible], ["Not eligible", not_eligible]],
+        chart=ChartSpec(kind="pie", x="Status", y=["Students"],
+                        title=f"Loan eligibility — {scope.describe()}"),
         provenance=provenance(metric, [TABLE_RD26], [*base_clauses, LOAN_ELIGIBLE],
                               scope, row_count=eligible),
     )
@@ -137,6 +139,9 @@ def second_emi(center: str | None = None, region: str | None = None) -> ToolResu
                 "scope": scope.describe()},
         columns=["Measure", "Students"],
         rows=[["Eligible base", base], ["Paid 2nd EMI", paid], ["Still owing", delta]],
+        # Bar, not pie: the base already contains the paid and owing counts.
+        chart=ChartSpec(kind="bar", x="Measure", y=["Students"],
+                        title=f"2nd-EMI collection — {scope.describe()}"),
         provenance=provenance(
             metric, [TABLE_FINANCE, TABLE_RD26], part1_clauses, scope, row_count=base,
             notes=["base is Finance Dump; paid count is RD26",

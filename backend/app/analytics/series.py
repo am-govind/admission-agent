@@ -98,6 +98,10 @@ def merge(results: list[ToolResult], *, title: str | None = None) -> ToolResult 
     if not rows:
         return None
 
+    # A pie draws one series, so a merged pie would show the first scope and silently
+    # drop the rest. Bars put every scope on the axis, which is the point of merging.
+    kind = "bar" if first.chart.kind == "pie" and len(labels) > 1 else first.chart.kind
+
     chart_title = title or f"{_base_title(first)} — {' vs '.join(labels)}"
     ranked = sorted(totals.items(), key=lambda kv: -kv[1])
     leader = ranked[0]
@@ -114,7 +118,7 @@ def merge(results: list[ToolResult], *, title: str | None = None) -> ToolResult 
                 "leader": leader[0]},
         columns=[x_column, *labels],
         rows=rows,
-        chart=ChartSpec(kind=first.chart.kind, x=x_column, y=labels, title=chart_title),
+        chart=ChartSpec(kind=kind, x=x_column, y=labels, title=chart_title),
         provenance=_merged_provenance(results, labels),
     )
 

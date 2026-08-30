@@ -9,7 +9,7 @@ from ..data.schema import TABLE_RD25
 from .filters import (ACTIVE, FOURTH_EMI, FULLY_PAID, NOT_CANCELLED, NOT_FREE, SENIOR,
                       resolve_scope)
 from .query import count_rows, fmt_int, fmt_pct, pct, provenance, require, target_lookup
-from .result import ToolResult
+from .result import ChartSpec, ToolResult
 
 
 def senior_retention(center: str | None = None, region: str | None = None) -> ToolResult:
@@ -46,6 +46,8 @@ def senior_retention(center: str | None = None, region: str | None = None) -> To
                 "target": target, "achieved_pct": achieved, "scope": scope.describe()},
         columns=["Payment stage", "Students"],
         rows=[["Total Paid", fully], ["4th EMI Paid", fourth]],
+        chart=ChartSpec(kind="bar", x="Payment stage", y=["Students"],
+                        title=f"Senior retention — {scope.describe()}"),
         provenance=provenance(
             metric, [TABLE_RD25], [*shared, FULLY_PAID], scope, row_count=value,
             notes=[f"two-part formula: {fully} fully paid + {fourth} at 4th EMI"]),

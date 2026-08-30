@@ -383,6 +383,10 @@ def admissions_summary(center: str | None = None, region: str | None = None,
                 "scope": scope_label},
         columns=["Measure", "Value"],
         rows=rows,
+        # The percentage and largest-class rows are not numeric and the render layer
+        # drops them, leaving the counts and their targets on one axis.
+        chart=ChartSpec(kind="bar", x="Measure", y=["Value"],
+                        title=f"Admissions against target — {scope_label}"),
         provenance=total.provenance,
     )
 

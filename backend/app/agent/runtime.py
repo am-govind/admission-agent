@@ -11,9 +11,10 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from ..analytics import series
-from ..analytics.result import ToolResult, jsonable
+from ..analytics.result import ChartSpec, ToolResult, jsonable
 from ..data import availability
 from ..models import ContentBlock
 from . import loop, memory, router
@@ -44,9 +45,48 @@ def _table_block(result: ToolResult) -> ContentBlock:
     )
 
 
+# Beyond this an inferred chart is more likely to be a wall of bars than a reading of
+# the data. Explicit specs are exempt: a 53-center leaderboard is charted on purpose.
+MAX_INFERRED_CHART_ROWS = 25
+
+
+def _numeric(value: object) -> bool:
+    """Whether a cell can be plotted. Booleans are integers in Python but not values."""
+    return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+
+
+def _numeric_column(result: ToolResult, index: int) -> bool:
+    """Whether every value present in a column is a number.
+
+    One numeric cell is not enough. A `Value` column holding a count in one row and a
+    formatted percentage in the next is two units on one axis, not a series.
+    """
+    present = [row[index] for row in result.rows if row[index] is not None]
+    return bool(present) and all(_numeric(v) for v in present)
+
+
+def _inferred_spec(result: ToolResult) -> ChartSpec | None:
+    """A chart for a table result whose analytics function did not ask for one.
+
+    The first column is the axis and every wholly numeric column after it is a series,
+    which is the shape almost every result already has. Without this, a result is
+    visualised only if someone remembered to attach a spec to it.
+    """
+    if not result.chartable or len(result.columns) < 2:
+        return None
+    if not 2 <= len(result.rows) <= MAX_INFERRED_CHART_ROWS:
+        return None
+    plotted = [column for index, column in enumerate(result.columns[1:], 1)
+               if _numeric_column(result, index)]
+    if not plotted:
+        return None
+    title = result.summary.split(". ")[0].rstrip(".") or result.metric
+    return ChartSpec(kind="bar", x=result.columns[0], y=plotted, title=title)
+
+
 def _chart_block(result: ToolResult) -> ContentBlock | None:
     """Chart the result when the spec names real columns and there is enough to plot."""
-    spec = result.chart
+    spec = result.chart or _inferred_spec(result)
     if spec is None or not result.rows:
         return None
     columns = list(result.columns)
@@ -62,6 +102,12 @@ def _chart_block(result: ToolResult) -> ContentBlock | None:
         # Subtotal and grand-total rows would dwarf every real bar.
         label = str(row[index[spec.x]])
         if label.lower() in series.TOTAL_LABELS:
+            continue
+        # A row carrying a formatted percentage or a name where the series expects a
+        # number has nothing to draw. Rows that are entirely empty stay, so a scope
+        # with no data keeps its labelled gap instead of vanishing from the chart.
+        present = [row[index[c]] for c in plotted if row[index[c]] is not None]
+        if present and not any(_numeric(v) for v in present):
             continue
         rows.append({spec.x: jsonable(row[index[spec.x]]),
                      **{c: jsonable(row[index[c]]) for c in plotted}})
